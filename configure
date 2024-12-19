@@ -285,6 +285,7 @@ External library support:
   --enable-libtls          enable LibreSSL (via libtls), needed for https support
                            if openssl, gnutls or mbedtls is not used [no]
   --enable-libtorch        enable Torch as one DNN backend [no]
+  --enable-libtokenizers   enable Tokenizers [no]
   --enable-libtwolame      enable MP2 encoding via libtwolame [no]
   --enable-libuavs3d       enable AVS3 decoding via libuavs3d [no]
   --enable-libv4l2         enable libv4l2/v4l-utils [no]
@@ -1966,6 +1967,7 @@ EXTERNAL_LIBRARY_LIST="
     libtesseract
     libtheora
     libtorch
+    libtokenizers
     libtwolame
     libuavs3d
     libv4l2
@@ -7030,6 +7032,7 @@ enabled libtesseract      && require_pkg_config libtesseract tesseract tesseract
 enabled libtheora         && require libtheora theora/theoraenc.h th_info_init -ltheoraenc -ltheoradec -logg
 enabled libtls            && require_pkg_config libtls libtls tls.h tls_configure
 enabled libtorch          && check_cxxflags -std=c++17 && require_cpp libtorch torch/torch.h "torch::Tensor" -ltorch -lc10 -ltorch_cpu -lstdc++ -lpthread
+enabled libtokenizers     && check_cxxflags -std=c++17 && require_cpp libtokenizers "tokenizers_cpp.h tokenizers_c.h" "" -ltokenizers_cpp -ltokenizers_c -lstdc++
 enabled libtwolame        && require libtwolame twolame.h twolame_init -ltwolame &&
                              { check_lib libtwolame twolame.h twolame_encode_buffer_float32_interleaved -ltwolame ||
                                die "ERROR: libtwolame must be installed and version must be >= 0.3.10"; }
