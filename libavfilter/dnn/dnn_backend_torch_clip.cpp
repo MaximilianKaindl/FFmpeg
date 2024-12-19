@@ -157,7 +157,7 @@ int encode_text_clip(THModel *th_model, THRequestItem *request) {
     DnnContext *ctx = th_model->ctx;
     THClipContext *clip_ctx = th_model->clip_ctx;
     infer_request->text_embeddings = new std::vector<torch::Tensor>();
-    
+
     int ret = create_tokenizer(th_model,th_model->clip_ctx->tokenizer_path);
     if(ret < 0) {
         av_log(ctx, AV_LOG_ERROR, "Error creating tokenizer\n");
@@ -298,38 +298,39 @@ int set_params_clip(THModel *th_model, const char **labels, int label_count, con
     th_model->clip_ctx->tokenizer_path = tokenizer_path;
     return 0;
 }
+
+torch::Tensor process_clip_similarity(const torch::Tensor& image_features, 
+                                    const torch::Tensor& text_embedding,
+                                    DnnContext *ctx,
+                                    float temperature = 0.07) {                                  
+    auto image_f = torch::nn::functional::normalize(image_features, 
+        torch::nn::functional::NormalizeFuncOptions().dim(-1));
+    auto text_f = torch::nn::functional::normalize(text_embedding,
+        torch::nn::functional::NormalizeFuncOptions().dim(-1));
+    
+    try{
+        auto similarity = torch::matmul(image_f, text_f.transpose(0, 1));
+        return similarity.div(temperature);
+    } catch (const c10::Error& e) {
+        av_log(ctx, AV_LOG_ERROR, "Matrix multiplication failed. Shapes: image %ldx%ld, text %ldx%ld\n",
+            image_features.size(0), image_features.size(1),
+            text_embedding.size(0), text_embedding.size(1));
+        throw;
+    }
+}
+
 int process_clip_inference(THModel *th_model, THInferRequest *infer_request, 
                                 const c10::Device& device, DnnContext *ctx) {
     try {
         std::vector<std::pair<float, std::string>> scored_labels;
         scored_labels.reserve(th_model->clip_ctx->labels.size());
         int i = 0;
+        torch::Tensor image_features = infer_request->input_tensor->to(device);
 
-        for(auto &text_embeddings : *(infer_request->text_embeddings)) {
-            auto text_embedding = text_embeddings.to(device);
-            torch::Tensor image_features = infer_request->input_tensor->to(device);
-            // Normalize features
-            image_features = torch::nn::functional::normalize(
-                image_features, 
-                torch::nn::functional::NormalizeFuncOptions().dim(-1)
-            );
-
-            text_embedding = torch::nn::functional::normalize(
-                text_embedding, 
-                torch::nn::functional::NormalizeFuncOptions().dim(-1)
-            );
-            torch::Tensor similarity;
-            try {
-                similarity = torch::matmul(image_features, text_embedding.transpose(0, 1));
-            } catch (const c10::Error& e) {
-                av_log(ctx, AV_LOG_ERROR, "Matrix multiplication failed. Shapes: image %ldx%ld, text %ldx%ld\n",
-                    image_features.size(0), image_features.size(1),
-                    text_embedding.size(0), text_embedding.size(1));
-                throw;
-            }
-            float temperature = 100.0;
-            similarity = similarity.div(temperature);
-            float sim_value = similarity.item<float>();
+        for(auto &text_embedding : *(infer_request->text_embeddings)) {
+            auto text_embedding_device = text_embedding.to(device);
+            auto similarity = process_clip_similarity(image_features, text_embedding_device, ctx);
+            float sim_value = (similarity).item<float>();
 
             scored_labels.push_back({sim_value, th_model->clip_ctx->labels[i]});
             i++;

@@ -15,6 +15,7 @@ typedef struct THClipContext {
     std::string tokenizer_path;
 } THClipContext;
 
+torch::Tensor process_clip_similarity(const torch::Tensor& image_features, const torch::Tensor& text_embedding,DnnContext *ctx, float temperature);
 int create_tokenizer(THModel *th_model, std::string tokenizer_path);
 int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx);
 void free_clip_context(THClipContext *clip_ctx);
