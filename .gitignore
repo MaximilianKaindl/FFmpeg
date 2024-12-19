@@ -44,3 +44,5 @@
 /libavcodec/vulkan/*.c
 /libavfilter/vulkan/*.c
 .vscode/
+test_resources/*
+out/*
