@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <tokenizers_cpp.h>
 #include "dnn_backend_torch_common.h"
 
 using tokenizers::Tokenizer;
@@ -14,6 +15,7 @@ typedef struct THClipContext {
     std::string tokenizer_path;
 } THClipContext;
 
+int create_tokenizer(THModel *th_model, std::string tokenizer_path);
 int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx);
 void free_clip_context(THClipContext *clip_ctx);
 int fill_model_input_clip(THModel *th_model, THRequestItem *request, DNNData input);

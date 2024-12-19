@@ -79,7 +79,7 @@ std::string LoadBytesFromFile(const std::string& path) {
     return data;
 }
 
-int create_tokenizer(THModel *th_model, const char * tokenizer_path) {
+int create_tokenizer(THModel *th_model, std::string tokenizer_path) {
     try {
         std::string tokenizer_path_str(tokenizer_path);
         auto blob = LoadBytesFromFile(tokenizer_path_str);
@@ -97,7 +97,6 @@ int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx) {
         th_model->jit_model->get_method("encode_text");
         th_model->is_clip_model = true;
         th_model->clip_ctx = (THClipContext *)av_mallocz(sizeof(THClipContext));
-        create_tokenizer(th_model,"./tokenizer.json");
         av_log(th_model->ctx, AV_LOG_INFO, 
                "Successfully initialized CLIP model\n");
         return 0;
@@ -158,6 +157,12 @@ int encode_text_clip(THModel *th_model, THRequestItem *request) {
     DnnContext *ctx = th_model->ctx;
     THClipContext *clip_ctx = th_model->clip_ctx;
     infer_request->text_embeddings = new std::vector<torch::Tensor>();
+    
+    int ret = create_tokenizer(th_model,th_model->clip_ctx->tokenizer_path);
+    if(ret < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Error creating tokenizer\n");
+        return ret;
+    }
 
     try {
         infer_request->text_embeddings->reserve(clip_ctx->labels.size());

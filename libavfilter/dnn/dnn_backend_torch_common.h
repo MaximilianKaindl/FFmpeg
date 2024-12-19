@@ -3,7 +3,6 @@
 
 #include <torch/torch.h>
 #include <torch/script.h>
-#include <tokenizers_cpp.h>
 
 struct THClipContext;
 
