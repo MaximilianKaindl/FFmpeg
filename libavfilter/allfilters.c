@@ -263,6 +263,7 @@ extern const AVFilter ff_vf_displace;
 extern const AVFilter ff_vf_dnn_classify;
 extern const AVFilter ff_vf_dnn_detect;
 extern const AVFilter ff_vf_dnn_processing;
+extern const AVFilter ff_vf_dnn_clip;
 extern const AVFilter ff_vf_doubleweave;
 extern const AVFilter ff_vf_drawbox;
 extern const AVFilter ff_vf_drawgraph;
