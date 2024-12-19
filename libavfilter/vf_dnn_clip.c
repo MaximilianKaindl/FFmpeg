@@ -32,19 +32,19 @@
 #include "libavutil/detection_bbox.h"
 #include "libavfilter/dnn_interface.h"
 
-typedef struct OpenCLIPContext {
+typedef struct CLIPContext {
     const AVClass *clazz;
     DnnContext dnnctx;           /* Base DNN context */
     char *labels_filename;       /* Path to text prompts file */
     char *tokenizer_path;       /* Path to text prompts file */
     char **labels;              /* Array of text prompts */
     int label_count;            /* Number of text prompts */
-} OpenCLIPContext;
+} CLIPContext;
 
-#define OFFSET(x) offsetof(OpenCLIPContext, x)
+#define OFFSET(x) offsetof(CLIPContext, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM
 
-static const AVOption dnn_openclip_options[] = {
+static const AVOption dnn_clip_options[] = {
     { "dnn_backend", "DNN backend", 
         OFFSET(dnnctx.backend_type), AV_OPT_TYPE_INT, 
         { .i64 = DNN_TH }, INT_MIN, INT_MAX, FLAGS, .unit = "backend" },
@@ -59,12 +59,12 @@ static const AVOption dnn_openclip_options[] = {
     { NULL }
 };
 
-AVFILTER_DNN_DEFINE_CLASS(dnn_openclip, DNN_TH);
+AVFILTER_DNN_DEFINE_CLASS(dnn_clip, DNN_TH);
 
 /**
  * Free allocated text prompts.
  */
-static void free_classify_labels(OpenCLIPContext *ctx)
+static void free_classify_labels(CLIPContext *ctx)
 {
     for (int i = 0; i < ctx->label_count; i++)
         av_freep(&ctx->labels[i]);
@@ -80,7 +80,7 @@ static int read_classify_label_file(AVFilterContext *context)
 {
     int line_len;
     FILE *file;
-    OpenCLIPContext *ctx = context->priv;
+    CLIPContext *ctx = context->priv;
 
     file = avpriv_fopen_utf8(ctx->labels_filename, "r");
     if (!file) {
@@ -135,9 +135,9 @@ static int read_classify_label_file(AVFilterContext *context)
 /**
  * Initialize the filter.
  */
-static av_cold int dnn_openclip_init(AVFilterContext *context)
+static av_cold int dnn_clip_init(AVFilterContext *context)
 {
-    OpenCLIPContext *ctx = context->priv;
+    CLIPContext *ctx = context->priv;
     int ret;
 
     ret = ff_dnn_init(&ctx->dnnctx, DFT_ANALYTICS_ZEROSHOTCLASSIFY, context);
@@ -155,9 +155,9 @@ static av_cold int dnn_openclip_init(AVFilterContext *context)
 /**
  * Uninitialize the filter.
  */
-static av_cold void dnn_openclip_uninit(AVFilterContext *context)
+static av_cold void dnn_clip_uninit(AVFilterContext *context)
 {
-    OpenCLIPContext *ctx = context->priv;
+    CLIPContext *ctx = context->priv;
     ff_dnn_uninit(&ctx->dnnctx);
     free_classify_labels(ctx);
 }
@@ -165,9 +165,9 @@ static av_cold void dnn_openclip_uninit(AVFilterContext *context)
  * Handle flushing of frames in the filter.
  * Ensures any remaining frames are processed when the stream ends.
  */
-static int dnn_openclip_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
+static int dnn_clip_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
 {
-    OpenCLIPContext *ctx = outlink->src->priv;
+    CLIPContext *ctx = outlink->src->priv;
     int ret;
     DNNAsyncStatusType async_state;
 
@@ -197,11 +197,11 @@ static int dnn_openclip_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t 
  * Filter activation function.
  * Controls the flow of frames through the filter and manages async processing.
  */
-static int dnn_openclip_activate(AVFilterContext *filter_ctx)
+static int dnn_clip_activate(AVFilterContext *filter_ctx)
 {
     AVFilterLink *inlink = filter_ctx->inputs[0];
     AVFilterLink *outlink = filter_ctx->outputs[0];
-    OpenCLIPContext *ctx = filter_ctx->priv;
+    CLIPContext *ctx = filter_ctx->priv;
     AVFrame *in = NULL;
     int64_t pts;
     int ret, status;
@@ -216,7 +216,7 @@ static int dnn_openclip_activate(AVFilterContext *filter_ctx)
         if (ret < 0)
             return ret;
         if (ret > 0) {
-            if (ff_dnn_execute_model_openclip(&ctx->dnnctx, in, NULL, ctx->labels, ctx->tokenizer_path, ctx->label_count) != 0) {
+            if (ff_dnn_execute_model_clip(&ctx->dnnctx, in, NULL, ctx->labels, ctx->tokenizer_path, ctx->label_count) != 0) {
                 return AVERROR(EIO);
             }
         }
@@ -242,7 +242,7 @@ static int dnn_openclip_activate(AVFilterContext *filter_ctx)
     if (ff_inlink_acknowledge_status(inlink, &status, &pts)) {
         if (status == AVERROR_EOF) {
             int64_t out_pts = pts;
-            ret = dnn_openclip_flush_frame(outlink, pts, &out_pts);
+            ret = dnn_clip_flush_frame(outlink, pts, &out_pts);
             ff_outlink_set_status(outlink, status, out_pts);
             return ret;
         }
@@ -262,16 +262,16 @@ static const enum AVPixelFormat pix_fmts[] = {
     AV_PIX_FMT_NONE
 };
 
-const AVFilter ff_vf_dnn_openclip = {
-    .name          = "dnn_openclip",
-    .description   = NULL_IF_CONFIG_SMALL("Apply OpenCLIP zero-shot classification."),
+const AVFilter ff_vf_dnn_clip = {
+    .name          = "dnn_clip",
+    .description   = NULL_IF_CONFIG_SMALL("Apply CLIP zero-shot classification."),
     .preinit       = ff_dnn_filter_init_child_class,
-    .priv_size     = sizeof(OpenCLIPContext),
-    .init          = dnn_openclip_init,
-    .uninit        = dnn_openclip_uninit,
-    .activate      = dnn_openclip_activate,  
+    .priv_size     = sizeof(CLIPContext),
+    .init          = dnn_clip_init,
+    .uninit        = dnn_clip_uninit,
+    .activate      = dnn_clip_activate,  
     FILTER_INPUTS(ff_video_default_filterpad),
     FILTER_OUTPUTS(ff_video_default_filterpad),
     FILTER_PIXFMTS_ARRAY(pix_fmts),
-    .priv_class    = &dnn_openclip_class,
+    .priv_class    = &dnn_clip_class,
 };
