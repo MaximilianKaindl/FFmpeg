@@ -58,6 +58,7 @@ typedef enum {
     DFT_PROCESS_FRAME,      // process the whole frame
     DFT_ANALYTICS_DETECT,   // detect from the whole frame
     DFT_ANALYTICS_CLASSIFY, // classify for each bounding box
+    DFT_ANALYTICS_ZEROSHOTCLASSIFY, // classify frame with zero-shot model
 }DNNFunctionType;
 
 typedef enum {
@@ -89,6 +90,13 @@ typedef struct DNNExecClassificationParams {
     DNNExecBaseParams base;
     const char *target;
 } DNNExecClassificationParams;
+
+typedef struct DNNExecZeroShotClassificationParams {
+    DNNExecBaseParams base;
+    const char **labels;
+    const int label_count;
+    const char *tokenizer_path;
+} DNNExecZeroShotClassificationParams;
 
 typedef int (*FramePrePostProc)(AVFrame *frame, DNNData *model, AVFilterContext *filter_ctx);
 typedef int (*DetectPostProc)(AVFrame *frame, DNNData *output, uint32_t nb, AVFilterContext *filter_ctx);

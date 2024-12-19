@@ -195,6 +195,23 @@ int ff_dnn_execute_model_classification(DnnContext *ctx, AVFrame *in_frame, AVFr
     return (ctx->dnn_module->execute_model)(ctx->model, &class_params.base);
 }
 
+int ff_dnn_execute_model_clip(DnnContext *ctx, AVFrame *in_frame, AVFrame *out_frame, const char **labels, const char* tokenizer_path, int label_count)
+{
+    DNNExecZeroShotClassificationParams class_params = {
+        {
+            .input_name     = ctx->model_inputname,
+            .output_names   = (const char **)ctx->model_outputnames,
+            .nb_output      = ctx->nb_outputs,
+            .in_frame       = in_frame,
+            .out_frame      = out_frame,
+        },
+        .labels = labels,
+        .tokenizer_path = tokenizer_path,
+        .label_count = label_count,
+    };
+    return (ctx->dnn_module->execute_model)(ctx->model, &class_params.base);
+}
+
 DNNAsyncStatusType ff_dnn_get_result(DnnContext *ctx, AVFrame **in_frame, AVFrame **out_frame)
 {
     return (ctx->dnn_module->get_result)(ctx->model, in_frame, out_frame);

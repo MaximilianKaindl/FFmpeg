@@ -59,6 +59,7 @@ int ff_dnn_get_input(DnnContext *ctx, DNNData *input);
 int ff_dnn_get_output(DnnContext *ctx, int input_width, int input_height, int *output_width, int *output_height);
 int ff_dnn_execute_model(DnnContext *ctx, AVFrame *in_frame, AVFrame *out_frame);
 int ff_dnn_execute_model_classification(DnnContext *ctx, AVFrame *in_frame, AVFrame *out_frame, const char *target);
+int ff_dnn_execute_model_clip(DnnContext *ctx, AVFrame *in_frame, AVFrame *out_frame, const char **labels, const char* tokenizer_path, int label_count);
 DNNAsyncStatusType ff_dnn_get_result(DnnContext *ctx, AVFrame **in_frame, AVFrame **out_frame);
 int ff_dnn_flush(DnnContext *ctx);
 void ff_dnn_uninit(DnnContext *ctx);
