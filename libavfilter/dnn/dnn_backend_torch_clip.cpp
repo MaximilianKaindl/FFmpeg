@@ -64,25 +64,47 @@ torch::Tensor get_tokens(THModel *th_model, std::string prompt) {
     }
 }
 
-std::string LoadBytesFromFile(const std::string& path) {
+int load_bytes_from_file(const std::string& path, std::string& data, void* log_ctx) {
     std::ifstream fs(path, std::ios::in | std::ios::binary);
     if (fs.fail()) {
-    std::cerr << "Cannot open " << path << std::endl;
-    exit(1);
+        av_log(log_ctx, AV_LOG_ERROR, "Cannot open file: %s\n", path.c_str());
+        return AVERROR(ENOENT);
     }
-    std::string data;
-    fs.seekg(0, std::ios::end);
-    size_t size = static_cast<size_t>(fs.tellg());
-    fs.seekg(0, std::ios::beg);
-    data.resize(size);
-    fs.read(data.data(), size);
-    return data;
+
+    try {
+        fs.seekg(0, std::ios::end);
+        size_t size = static_cast<size_t>(fs.tellg());
+        fs.seekg(0, std::ios::beg);
+
+        if (fs.fail()) {
+            av_log(log_ctx, AV_LOG_ERROR, "Failed to determine file size: %s\n", path.c_str());
+            return AVERROR(EIO);
+        }
+
+        data.resize(size);
+        fs.read(data.data(), size);
+
+        if (fs.fail()) {
+            av_log(log_ctx, AV_LOG_ERROR, "Failed to read file: %s\n", path.c_str());
+            return AVERROR(EIO);
+        }
+
+        return 0;
+    } catch (const std::exception& e) {
+        av_log(log_ctx, AV_LOG_ERROR, "Exception while reading file %s: %s\n", 
+               path.c_str(), e.what());
+        return AVERROR(ENOMEM);
+    }
 }
 
 int create_tokenizer(THModel *th_model, std::string tokenizer_path) {
+    std::string blob;
+    int ret = load_bytes_from_file(tokenizer_path, blob, th_model->ctx);
+    if (ret < 0) {
+        return ret;
+    }
+
     try {
-        std::string tokenizer_path_str(tokenizer_path);
-        auto blob = LoadBytesFromFile(tokenizer_path_str);
         th_model->clip_ctx->tokenizer = Tokenizer::FromBlobJSON(blob);
         return 0;
     } catch (const c10::Error& e) {
