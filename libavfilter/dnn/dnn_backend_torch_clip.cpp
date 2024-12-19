@@ -1,5 +1,6 @@
-#include "clip_backend.h"
+#include "dnn_backend_torch_clip.h"
 #include "dnn_backend_common.h"
+#include "dnn_backend_torch_common.h"
 
 extern "C" {
 #include "libavutil/mem.h"
@@ -7,7 +8,7 @@ extern "C" {
 #include "libavutil/log.h"
 }
 
-static torch::Tensor get_tokens(THModel *th_model, std::string prompt) {
+torch::Tensor get_tokens(THModel *th_model, std::string prompt) {
     DnnContext *ctx = th_model->ctx;
     const int expected_length = 77;  // CLIP's standard sequence length
     const int start_token = 49406;   // CLIP's BOS token
@@ -63,7 +64,7 @@ static torch::Tensor get_tokens(THModel *th_model, std::string prompt) {
     }
 }
 
-static std::string LoadBytesFromFile(const std::string& path) {
+std::string LoadBytesFromFile(const std::string& path) {
     std::ifstream fs(path, std::ios::in | std::ios::binary);
     if (fs.fail()) {
     std::cerr << "Cannot open " << path << std::endl;
@@ -78,7 +79,7 @@ static std::string LoadBytesFromFile(const std::string& path) {
     return data;
 }
 
-static int create_tokenizer(THModel *th_model, const char * tokenizer_path) {
+int create_tokenizer(THModel *th_model, const char * tokenizer_path) {
     try {
         std::string tokenizer_path_str(tokenizer_path);
         auto blob = LoadBytesFromFile(tokenizer_path_str);
@@ -90,9 +91,8 @@ static int create_tokenizer(THModel *th_model, const char * tokenizer_path) {
     }
 }
 
-static int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx) {
+int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx) {
     try {
-        //OpenCLIPContext *filter_ctx = context->priv;
         th_model->jit_model->get_method("encode_image");
         th_model->jit_model->get_method("encode_text");
         th_model->is_clip_model = true;
@@ -108,7 +108,7 @@ static int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx) {
         return AVERROR(EINVAL);
     }
 }
-static int encode_image_clip(THModel *th_model, THRequestItem *request) {
+int encode_image_clip(THModel *th_model, THRequestItem *request) {
     THInferRequest *infer_request = request->infer_request;
     DnnContext *ctx = th_model->ctx;
     
@@ -153,7 +153,7 @@ static int encode_image_clip(THModel *th_model, THRequestItem *request) {
     }
 }
 
-static int encode_text_clip(THModel *th_model, THRequestItem *request) {
+int encode_text_clip(THModel *th_model, THRequestItem *request) {
     THInferRequest *infer_request = request->infer_request;
     DnnContext *ctx = th_model->ctx;
     THClipContext *clip_ctx = th_model->clip_ctx;
@@ -185,15 +185,21 @@ static int encode_text_clip(THModel *th_model, THRequestItem *request) {
     }
 }
 
-static int fill_model_input_clip(THModel *th_model, THRequestItem *request) 
+static void deleter(void *arg)
+{
+    av_freep(&arg);
+}
+
+int fill_model_input_clip(THModel *th_model, THRequestItem *request, DNNData input) 
 {
     DnnContext *ctx = th_model->ctx;
-    infer_request = request->infer_request;
+    THInferRequest *infer_request = request->infer_request;
     int ret;
 
     *infer_request->input_tensor = torch::from_blob(input.data,
     {1, 3, 224, 224},
-    deleter, torch::kFloat32);
+    deleter, 
+    torch::kFloat32);
     
     *infer_request->output = infer_request->input_tensor->clone().detach();
     // Verify the clone worked
@@ -216,7 +222,7 @@ static int fill_model_input_clip(THModel *th_model, THRequestItem *request)
 
     return 0;
 }
-static void softmax(std::vector<std::pair<float, std::string>>& labels) {
+void softmax(std::vector<std::pair<float, std::string>>& labels) {
     // Find max for numerical stability
     float max_score = -std::numeric_limits<float>::infinity();
     for (const auto& label : labels) {
@@ -237,7 +243,7 @@ static void softmax(std::vector<std::pair<float, std::string>>& labels) {
 }
 
 
-static void print_clip_similarity_scores(THModel *th_model, const std::vector<std::pair<float, std::string>>& scored_labels, DnnContext *ctx) {
+void print_clip_similarity_scores(THModel *th_model, const std::vector<std::pair<float, std::string>>& scored_labels, DnnContext *ctx) {
     try {
         av_log(ctx, AV_LOG_INFO, "\nCLIP Analysis Results:\n");
         // Create a mutable copy for sorting
@@ -271,7 +277,7 @@ static void print_clip_similarity_scores(THModel *th_model, const std::vector<st
         av_log(ctx, AV_LOG_ERROR, "Error processing similarity scores: %s\n", e.what());
     }
 }
-static int set_params_clip(THModel *th_model, const char **labels, int label_count, const char *tokenizer_path) {
+int set_params_clip(THModel *th_model, const char **labels, int label_count, const char *tokenizer_path) {
     if (!th_model || !labels || label_count <= 0) {
         return AVERROR(EINVAL);
     }
@@ -287,7 +293,7 @@ static int set_params_clip(THModel *th_model, const char **labels, int label_cou
     th_model->clip_ctx->tokenizer_path = tokenizer_path;
     return 0;
 }
-static int process_clip_inference(THModel *th_model, THInferRequest *infer_request, 
+int process_clip_inference(THModel *th_model, THInferRequest *infer_request, 
                                 const c10::Device& device, DnnContext *ctx) {
     try {
         std::vector<std::pair<float, std::string>> scored_labels;

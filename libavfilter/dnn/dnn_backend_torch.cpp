@@ -26,40 +26,8 @@
 #include <torch/torch.h>
 #include <torch/script.h>
 #include <vector>
-#include <dnn_backend_clip.h>
-
-extern "C" {
-#include "dnn_io_proc.h"
-#include "dnn_backend_common.h"
-#include "libavutil/opt.h"
-#include "libavutil/mem.h"
-#include "queue.h"
-#include "safe_queue.h"
-}
-
-typedef struct THModel {
-    DNNModel model;
-    DnnContext *ctx;
-    torch::jit::Module *jit_model;
-    SafeQueue *request_queue;
-    Queue *task_queue;
-    Queue *lltask_queue;
-    bool is_clip_model; 
-    THClipContext *clip_ctx;
-} THModel;
-
-typedef struct THInferRequest {
-    torch::Tensor *output;
-    torch::Tensor *input_tensor;
-    std::vector<torch::Tensor> *text_embeddings;
-} THInferRequest;
-
-typedef struct THRequestItem {
-    THInferRequest *infer_request;
-    LastLevelTaskItem *lltask;
-    DNNAsyncExecModule exec_module;
-} THRequestItem;
-
+#include "dnn_backend_torch_clip.h"
+#include "dnn_backend_torch_common.h"
 
 #define OFFSET(x) offsetof(THOptions, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM
@@ -224,7 +192,7 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
             break;
     }
     if(th_model->is_clip_model){
-        fill_model_input_clip(th_model,request);
+        fill_model_input_clip(th_model, request, input);
         if (ret < 0) {
             av_log(ctx, AV_LOG_ERROR, "CLIP preprocessing failed\n");
             goto err;
