@@ -10,6 +10,7 @@ extern "C" {
 
 torch::Tensor get_tokens(THModel *th_model, std::string prompt) {
     DnnContext *ctx = th_model->ctx;
+    //TODO : Load Special Tokens from tokenizer
     const int expected_length = 77;  // CLIP's standard sequence length
     const int start_token = 49406;   // CLIP's BOS token
     const int end_token = 49407;     // CLIP's EOS token
