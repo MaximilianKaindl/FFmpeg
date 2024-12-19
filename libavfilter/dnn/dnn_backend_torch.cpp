@@ -25,6 +25,8 @@
 
 #include <torch/torch.h>
 #include <torch/script.h>
+#include <vector>
+#include <dnn_backend_clip.h>
 
 extern "C" {
 #include "dnn_io_proc.h"
@@ -42,11 +44,14 @@ typedef struct THModel {
     SafeQueue *request_queue;
     Queue *task_queue;
     Queue *lltask_queue;
+    bool is_clip_model; 
+    THClipContext *clip_ctx;
 } THModel;
 
 typedef struct THInferRequest {
     torch::Tensor *output;
     torch::Tensor *input_tensor;
+    std::vector<torch::Tensor> *text_embeddings;
 } THInferRequest;
 
 typedef struct THRequestItem {
@@ -95,6 +100,10 @@ static void th_free_request(THInferRequest *request)
         delete(request->input_tensor);
         request->input_tensor = NULL;
     }
+    if (request->text_embeddings) {
+        delete(request->text_embeddings);
+        request->text_embeddings = NULL;
+    }
     return;
 }
 
@@ -139,6 +148,10 @@ static void dnn_free_model_th(DNNModel **model)
     }
     ff_queue_destroy(th_model->task_queue);
     delete th_model->jit_model;
+    if (th_model->is_clip_model) {
+        th_model->clip_ctx->tokenizer.release();
+        av_freep(&th_model->clip_ctx);
+    }
     av_freep(&th_model);
     *model = NULL;
 }
@@ -186,32 +199,41 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     height_idx = dnn_get_height_idx_by_layout(input.layout);
     channel_idx = dnn_get_channel_idx_by_layout(input.layout);
     input.dims[height_idx] = task->in_frame->height;
-    input.dims[width_idx] = task->in_frame->width;
+    input.dims[width_idx] = task->in_frame->width;        
     input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
-                           input.dims[channel_idx] * sizeof(float));
+                            input.dims[channel_idx] * sizeof(float));
     if (!input.data)
         return AVERROR(ENOMEM);
     infer_request->input_tensor = new torch::Tensor();
     infer_request->output = new torch::Tensor();
-
+    
     switch (th_model->model.func_type) {
-    case DFT_PROCESS_FRAME:
-        input.scale = 255;
-        if (task->do_ioproc) {
-            if (th_model->model.frame_pre_proc != NULL) {
-                th_model->model.frame_pre_proc(task->in_frame, &input, th_model->model.filter_ctx);
-            } else {
-                ff_proc_from_frame_to_dnn(task->in_frame, &input, ctx);
+        case DFT_PROCESS_FRAME:
+        case DFT_ANALYTICS_ZEROSHOTCLASSIFY:
+            input.scale = 255;
+            if (task->do_ioproc) {
+                if (th_model->model.frame_pre_proc != NULL) {
+                    th_model->model.frame_pre_proc(task->in_frame, &input, th_model->model.filter_ctx);
+                } else {
+                    ff_proc_from_frame_to_dnn(task->in_frame, &input, ctx);
+                }
             }
+            break;
+        default:
+            avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
+            break;
+    }
+    if(th_model->is_clip_model){
+        fill_model_input_clip(th_model,request);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "CLIP preprocessing failed\n");
+            goto err;
         }
-        break;
-    default:
-        avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
-        break;
+        return 0;
     }
     *infer_request->input_tensor = torch::from_blob(input.data,
-        {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
-        deleter, torch::kFloat32);
+    {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
+    deleter, torch::kFloat32);
     return 0;
 
 err:
@@ -219,7 +241,7 @@ err:
     return ret;
 }
 
-static int th_start_inference(void *args)
+static int th_start_inference(void *args) 
 {
     THRequestItem *request = (THRequestItem *)args;
     THInferRequest *infer_request = NULL;
@@ -227,7 +249,6 @@ static int th_start_inference(void *args)
     TaskItem *task = NULL;
     THModel *th_model = NULL;
     DnnContext *ctx = NULL;
-    std::vector<torch::jit::IValue> inputs;
     torch::NoGradGuard no_grad;
 
     if (!request) {
@@ -251,12 +272,16 @@ static int th_start_inference(void *args)
     }
     // Transfer tensor to the same device as model
     c10::Device device = (*th_model->jit_model->parameters().begin()).device();
-    if (infer_request->input_tensor->device() != device)
-        *infer_request->input_tensor = infer_request->input_tensor->to(device);
-    inputs.push_back(*infer_request->input_tensor);
+    if (th_model->is_clip_model) {
+        return process_clip_inference(th_model, infer_request, device, ctx);
+    } else {
+        std::vector<torch::jit::IValue> inputs;
+        if (infer_request->input_tensor->device() != device) 
+            *infer_request->input_tensor = infer_request->input_tensor->to(device);
+        inputs.push_back(*infer_request->input_tensor);
 
-    *infer_request->output = th_model->jit_model->forward(inputs).toTensor();
-
+        *infer_request->output = th_model->jit_model->forward(inputs).toTensor();
+    }
     return 0;
 }
 
@@ -287,6 +312,7 @@ static void infer_completion_callback(void *args) {
 
     switch (th_model->model.func_type) {
     case DFT_PROCESS_FRAME:
+    case DFT_ANALYTICS_ZEROSHOTCLASSIFY:
         if (task->do_ioproc) {
             // Post process can only deal with CPU memory.
             if (output->device() != torch::kCPU)
@@ -296,6 +322,10 @@ static void infer_completion_callback(void *args) {
             if (th_model->model.frame_post_proc != NULL) {
                 th_model->model.frame_post_proc(task->out_frame, &outputs, th_model->model.filter_ctx);
             } else {
+                if(th_model->is_clip_model){
+                    //Clip does not change the input
+                    task->out_frame = av_frame_clone(task->in_frame);
+                }
                 ff_proc_from_dnn_to_frame(task->out_frame, &outputs, th_model->ctx);
             }
         } else {
@@ -338,7 +368,7 @@ static int execute_model_th(THRequestItem *request, Queue *lltask_queue)
     }
     task = lltask->task;
     th_model = (THModel *)task->model;
-
+    
     ret = fill_model_input_th(th_model, request);
     if ( ret != 0) {
         goto err;
@@ -413,6 +443,7 @@ static THInferRequest *th_create_inference_request(void)
     }
     request->input_tensor = NULL;
     request->output = NULL;
+    request->text_embeddings = NULL;
     return request;
 }
 
@@ -428,7 +459,7 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         return NULL;
     model = &th_model->model;
     th_model->ctx = ctx;
-
+    
     c10::Device device = c10::Device(device_name);
     if (device.is_xpu()) {
         if (!at::hasXPU()) {
@@ -445,6 +476,12 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         th_model->jit_model = new torch::jit::Module;
         (*th_model->jit_model) = torch::jit::load(ctx->model_filename);
         th_model->jit_model->to(device);
+
+        // Check if this is a CLIP model and initialize accordingly
+        if (func_type == DFT_ANALYTICS_ZEROSHOTCLASSIFY && init_clip_model(th_model,filter_ctx) < 0) {
+            // Not a CLIP model or initialization failed
+            th_model->is_clip_model = false;
+        }
     } catch (const c10::Error& e) {
         av_log(ctx, AV_LOG_ERROR, "Failed to load torch model\n");
         goto fail;
@@ -543,6 +580,14 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
     if (!request) {
         av_log(ctx, AV_LOG_ERROR, "unable to get infer request.\n");
         return AVERROR(EINVAL);
+    }
+    if(model->func_type == DFT_ANALYTICS_ZEROSHOTCLASSIFY) {
+        DNNExecZeroShotClassificationParams *params = (DNNExecZeroShotClassificationParams *) exec_params;
+        ret = set_params_clip(th_model, params->labels, params->label_count, params->tokenizer_path);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "label file invalid.\n");
+            return ret;
+        }
     }
 
     return execute_model_th(request, th_model->lltask_queue);
