@@ -30,32 +30,32 @@
 #include "libavutil/time.h"
 #include "libavutil/avstring.h"
 #include "libavutil/detection_bbox.h"
-#include "libavfilter/dnn_interface.h"
 
 typedef struct CLIPContext {
     const AVClass *clazz;
-    DnnContext dnnctx;           /* Base DNN context */
-    char *labels_filename;       /* Path to text prompts file */
-    char *tokenizer_path;       /* Path to text prompts file */
-    char **labels;              /* Array of text prompts */
-    int label_count;            /* Number of text prompts */
+    DnnContext dnnctx;
+    char *labels_filename;      
+    char *tokenizer_path;       
+    char **labels;
+    int label_count;
 } CLIPContext;
 
-#define OFFSET(x) offsetof(CLIPContext, x)
+#define OFFSET(x) offsetof(CLIPContext, dnnctx.x)
+#define OFFSET2(x) offsetof(CLIPContext, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM
 
 static const AVOption dnn_clip_options[] = {
     { "dnn_backend", "DNN backend", 
-        OFFSET(dnnctx.backend_type), AV_OPT_TYPE_INT, 
+        OFFSET(backend_type), AV_OPT_TYPE_INT, 
         { .i64 = DNN_TH }, INT_MIN, INT_MAX, FLAGS, .unit = "backend" },
 #if (CONFIG_LIBTORCH == 1)
     { "torch", "torch backend flag", 
         0, AV_OPT_TYPE_CONST, { .i64 = DNN_TH }, 0, 0, FLAGS, .unit = "backend" },
 #endif
     { "labels", "path to text prompts file", 
-        OFFSET(labels_filename), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
+        OFFSET2(labels_filename), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
     { "tokenizer", "path to text tokenizer.json file", 
-        OFFSET(tokenizer_path), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
+        OFFSET2(tokenizer_path), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
     { NULL }
 };
 
