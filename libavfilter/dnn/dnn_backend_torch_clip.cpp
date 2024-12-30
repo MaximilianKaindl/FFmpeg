@@ -130,85 +130,82 @@ int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx) {
         return AVERROR(EINVAL);
     }
 }
-int encode_image_clip(THModel *th_model, THRequestItem *request) {
-    THInferRequest *infer_request = request->infer_request;
-    DnnContext *ctx = th_model->ctx;
-    
-    try {
-        // Get model's device
-        c10::Device device = (*th_model->jit_model->parameters().begin()).device();
-        
-         // First normalize to [0,1] range
-        torch::Tensor image_tensor = infer_request->input_tensor->to(torch::kFloat32).div(255.0);
-        
-        // Apply CLIP specific normalization
-        std::vector<double> mean = {0.48145466, 0.4578275, 0.40821073};
-        std::vector<double> std = {0.26862954, 0.26130258, 0.27577711};
-        
-        for (int c = 0; c < 3; c++) {
-            image_tensor.select(1, c).sub_(mean[c]).div_(std[c]);
-        }
-        
-        // Move to correct device and get image features
-        image_tensor = image_tensor.to(device);
-        
-        // Get image features
-        auto image_features = th_model->jit_model->run_method(
-            "encode_image",
-            image_tensor,
-            true  // normalize
-        );
 
-        if (!image_features.isTensor()) {
-            av_log(ctx, AV_LOG_ERROR, "Model returned invalid non-tensor output\n");
-            return AVERROR(EINVAL);
-        }
-
-        torch::Tensor encoded = image_features.toTensor();
-
-        *infer_request->input_tensor = encoded;
-        return 0;
-
-    } catch (const c10::Error& e) {
-        av_log(ctx, AV_LOG_ERROR, "Image encoding error: %s\n", e.what());
-        return AVERROR(EINVAL);
-    }
-}
-
-int encode_text_clip(THModel *th_model, THRequestItem *request) {
+int forward_to_model(THModel *th_model, THRequestItem *request) {
     THInferRequest *infer_request = request->infer_request;
     DnnContext *ctx = th_model->ctx;
     THClipContext *clip_ctx = th_model->clip_ctx;
     infer_request->text_embeddings = new std::vector<torch::Tensor>();
 
-    int ret = create_tokenizer(th_model,th_model->clip_ctx->tokenizer_path);
+    if (!clip_ctx || clip_ctx->labels.empty()) {
+        av_log(ctx, AV_LOG_ERROR, "No labels provided for text encoding\n");
+        return AVERROR(EINVAL);
+    }
+
+    int ret = create_tokenizer(th_model, th_model->clip_ctx->tokenizer_path);
     if(ret < 0) {
         av_log(ctx, AV_LOG_ERROR, "Error creating tokenizer\n");
         return ret;
     }
 
     try {
-        infer_request->text_embeddings->reserve(clip_ctx->labels.size());
-
         c10::Device device = (*th_model->jit_model->parameters().begin()).device();
-
+        torch::Tensor image_tensor = *(infer_request->input_tensor);
+        
+        // Get text features for all prompts
+        std::vector<torch::Tensor> text_tokens;
+        text_tokens.reserve(clip_ctx->labels.size());
+        
         for (const auto& label : clip_ctx->labels) {
-            torch::Tensor tokens = get_tokens(th_model, label);
-            tokens = tokens.to(device);
-
-            auto encoded_result = th_model->jit_model->run_method("encode_text", tokens, true);
-            
-            if (!encoded_result.isTensor()) {
-                av_log(ctx, AV_LOG_ERROR, "Model returned invalid non-tensor output for text encoding\n");
+            auto tokens = get_tokens(th_model, label);
+            if (!tokens.defined()) {
+                av_log(ctx, AV_LOG_ERROR, "Failed to tokenize text: %s\n", label.c_str());
                 return AVERROR(EINVAL);
             }
-            torch::Tensor encoded_tensor = encoded_result.toTensor();
-            infer_request->text_embeddings->push_back(encoded_tensor.clone());
+            text_tokens.push_back(tokens.to(device));
         }
+
+        // Concatenate all text tokens for batch processing
+        auto text_input = torch::cat(text_tokens, 0);
+
+        // Forward pass through model
+        std::vector<torch::jit::IValue> inputs;
+        inputs.push_back(image_tensor);
+        inputs.push_back(text_input);
         
+        auto output = th_model->jit_model->forward(inputs);
+        if (!output.isTuple()) {
+            av_log(ctx, AV_LOG_ERROR, "Expected tuple output from model\n");
+            return AVERROR(EINVAL);
+        }
+
+        auto output_tuple = output.toTuple();
+        if (output_tuple->elements().size() != 3) {
+            av_log(ctx, AV_LOG_ERROR, "Expected 3 outputs but got %ld\n", 
+                   output_tuple->elements().size());
+            return AVERROR(EINVAL);
+        }
+
+        // Extract and process outputs
+        auto image_features = output_tuple->elements()[0].toTensor();
+        *infer_request->input_tensor = image_features.clone();
+        
+        auto text_features = output_tuple->elements()[1].toTensor();
+        auto text_features_split = text_features.split(1, 0);
+        
+        for (const auto& text_feature : text_features_split) {
+            infer_request->text_embeddings->push_back(text_feature.clone());
+        }
+        // Store logit scale for later use 
+        // TODO not working yet
+        auto logit_tensor = output_tuple->elements()[2].toTensor();
+        clip_ctx->logit_scale = logit_tensor.item<float>();
         return 0;
     } catch (const c10::Error& e) {
-        av_log(ctx, AV_LOG_ERROR, "Text encoding error: %s\n", e.what());
+        av_log(ctx, AV_LOG_ERROR, "Torch error in model forward pass: %s\n", e.what());
+        return AVERROR(EINVAL);
+    } catch (const std::exception& e) {
+        av_log(ctx, AV_LOG_ERROR, "Error in model forward pass: %s\n", e.what());
         return AVERROR(EINVAL);
     }
 }
@@ -222,12 +219,12 @@ int fill_model_input_clip(THModel *th_model, THRequestItem *request, DNNData inp
 {
     DnnContext *ctx = th_model->ctx;
     THInferRequest *infer_request = request->infer_request;
-    int ret;
-
-    *infer_request->input_tensor = torch::from_blob(input.data,
-    {1, 3, 224, 224},
-    deleter, 
-    torch::kFloat32);
+    *infer_request->input_tensor = torch::from_blob(
+        input.data,
+        {1, 3, 224, 224},
+        deleter, 
+        torch::kFloat32
+    );
     
     *infer_request->output = infer_request->input_tensor->clone().detach();
     // Verify the clone worked
@@ -236,53 +233,44 @@ int fill_model_input_clip(THModel *th_model, THRequestItem *request, DNNData inp
         return AVERROR(EINVAL);
     }
 
-    ret = encode_image_clip(th_model, request);
+    int ret;
+    ret = forward_to_model(th_model, request);
     if (ret < 0) {
         av_log(ctx, AV_LOG_ERROR, "Image encoding failed in CLIP preprocessing\n");
         return ret;
     }
 
-    ret = encode_text_clip(th_model, request);
-    if (ret < 0) {
-        av_log(ctx, AV_LOG_ERROR, "Text encoding failed in CLIP preprocessing\n");
-        return ret;
-    }
-
     return 0;
 }
-void softmax(std::vector<std::pair<float, std::string>>& labels) {
-    // Find max for numerical stability
-    float max_score = -std::numeric_limits<float>::infinity();
-    for (const auto& label : labels) {
-        max_score = std::max(max_score, label.first);
+
+std::vector<std::pair<float, std::string>> softmax_and_map_to_labels(const std::vector<float>& scores, const std::vector<std::string>& labels) {
+    torch::Tensor scores_tensor = torch::tensor(scores);
+    torch::Tensor softmax_scores = torch::softmax(scores_tensor, 0);
+    
+    std::vector<std::pair<float, std::string>> scored_labels;
+    scored_labels.reserve(scores.size());
+    
+    // Access softmax scores
+    auto scores_accessor = softmax_scores.accessor<float,1>();
+    
+    for (size_t i = 0; i < scores.size(); i++) {
+        scored_labels.emplace_back(
+            scores_accessor[i] * 100.0f,  // Convert to percentage
+            labels[i]
+        );
     }
     
-    // Compute exp(x-max) and sum
-    float sum_exp = 0.0f;
-    for (auto& label : labels) {
-        label.first = std::exp(label.first - max_score);
-        sum_exp += label.first;
-    }
+    std::sort(scored_labels.begin(), scored_labels.end(),
+              std::greater<std::pair<float, std::string>>());
     
-    // Normalize
-    for (auto& label : labels) {
-        label.first = (label.first / sum_exp);
-    }
+    return scored_labels;
 }
 
 
 void print_clip_similarity_scores(THModel *th_model, const std::vector<std::pair<float, std::string>>& scored_labels, DnnContext *ctx) {
     try {
         av_log(ctx, AV_LOG_INFO, "\nCLIP Analysis Results:\n");
-        // Create a mutable copy for sorting
-        std::vector<std::pair<float, std::string>> sorted_labels = scored_labels;
-        softmax(sorted_labels);
-        std::sort(sorted_labels.begin(), sorted_labels.end(),
-                 std::greater<std::pair<float, std::string>>());
-        
-        av_log(ctx, AV_LOG_INFO, "\nRanked Matches:\n");
-        // Remove const from the loop variable
-        for (auto& scored_label : sorted_labels) {
+        for (auto& scored_label : scored_labels) {
             const float high_confidence_threshold = 50.0f;
             if (scored_label.first >= high_confidence_threshold) {
                 av_log(ctx, AV_LOG_INFO, "✓ ");
@@ -295,10 +283,10 @@ void print_clip_similarity_scores(THModel *th_model, const std::vector<std::pair
                    scored_label.second.c_str());
         }
         
-        if (!sorted_labels.empty()) {
+        if (!scored_labels.empty()) {
             av_log(ctx, AV_LOG_INFO, "\nBest match: \"%s\" with %.1f%% confidence\n",
-                   sorted_labels[0].second.c_str(),
-                   sorted_labels[0].first);
+                   scored_labels[0].second.c_str(),
+                   scored_labels[0].first);
         }
         
     } catch (const c10::Error& e) {
@@ -322,46 +310,61 @@ int set_params_clip(THModel *th_model, const char **labels, int label_count, con
     return 0;
 }
 
+torch::Tensor normalize_features(const torch::Tensor& features, int64_t dim = 1) {
+    return torch::nn::functional::normalize(features, 
+        torch::nn::functional::NormalizeFuncOptions().dim(dim));
+}
+
 torch::Tensor process_clip_similarity(const torch::Tensor& image_features, 
                                     const torch::Tensor& text_embedding,
                                     DnnContext *ctx,
-                                    float temperature = 0.07) {                                  
-    auto image_f = torch::nn::functional::normalize(image_features, 
-        torch::nn::functional::NormalizeFuncOptions().dim(-1));
-    auto text_f = torch::nn::functional::normalize(text_embedding,
-        torch::nn::functional::NormalizeFuncOptions().dim(-1));
-    
-    try{
-        auto similarity = torch::matmul(image_f, text_f.transpose(0, 1));
+                                    float logit_scale,
+                                    float temperature = 1.0) {                         
+    auto image_f = normalize_features(image_features);
+    auto text_f = normalize_features(text_embedding);
+
+    try {
+        auto similarity = torch::matmul(image_f, text_f.transpose(0,1));    
+        similarity = similarity * logit_scale;      
         return similarity.div(temperature);
     } catch (const c10::Error& e) {
-        av_log(ctx, AV_LOG_ERROR, "Matrix multiplication failed. Shapes: image %ldx%ld, text %ldx%ld\n",
-            image_features.size(0), image_features.size(1),
-            text_embedding.size(0), text_embedding.size(1));
-        throw;
+        av_log(ctx, AV_LOG_ERROR, "Similarity computation failed: %s\n", e.what());
+        return torch::Tensor();
     }
 }
 
 int process_clip_inference(THModel *th_model, THInferRequest *infer_request, 
-                                const c10::Device& device, DnnContext *ctx) {
+                         const c10::Device& device, DnnContext *ctx) {
+    std::vector<float> scores;
+    scores.reserve(th_model->clip_ctx->labels.size());
+    float logit_scale = std::clamp(th_model->clip_ctx->logit_scale, 1.0f, 100.0f);
     try {
-        std::vector<std::pair<float, std::string>> scored_labels;
-        scored_labels.reserve(th_model->clip_ctx->labels.size());
-        int i = 0;
         torch::Tensor image_features = infer_request->input_tensor->to(device);
 
-        for(auto &text_embedding : *(infer_request->text_embeddings)) {
-            auto text_embedding_device = text_embedding.to(device);
-            auto similarity = process_clip_similarity(image_features, text_embedding_device, ctx);
-            float sim_value = (similarity).item<float>();
+        for (size_t i = 0; i < infer_request->text_embeddings->size(); i++) {
+            auto text_embedding = (*infer_request->text_embeddings)[i].to(device);
+            
+            auto similarity = process_clip_similarity(image_features,text_embedding,ctx,logit_scale);
+            float similarity_value = similarity.item<float>();
+                        
+            scores.push_back({
+                similarity_value
+            });
 
-            scored_labels.push_back({sim_value, th_model->clip_ctx->labels[i]});
-            i++;
+            av_log(ctx, AV_LOG_DEBUG, 
+                   "Label %s: sim_value=%.4f, prob_value=%.4f%%\n", 
+                   th_model->clip_ctx->labels[i].c_str(), similarity.item<float>(), similarity_value);
+
         }
-        print_clip_similarity_scores(th_model, scored_labels, ctx);              
+        auto scored_labels = softmax_and_map_to_labels(scores,th_model->clip_ctx->labels);
+        print_clip_similarity_scores(th_model, scored_labels, ctx);
+        return 0;
+
     } catch (const c10::Error& e) {
-        av_log(ctx, AV_LOG_ERROR, "Inference error: %s\n", e.what());
+        av_log(ctx, AV_LOG_ERROR, "CLIP inference error: %s\n", e.what());
+        return AVERROR(EINVAL);
+    } catch (const std::exception& e) {
+        av_log(ctx, AV_LOG_ERROR, "General inference error: %s\n", e.what());
         return AVERROR(EINVAL);
     }
-    return 0;
 }
