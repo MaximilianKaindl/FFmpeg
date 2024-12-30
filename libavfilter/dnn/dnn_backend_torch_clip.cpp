@@ -352,8 +352,8 @@ int process_clip_inference(THModel *th_model, THInferRequest *infer_request,
             });
 
             av_log(ctx, AV_LOG_DEBUG, 
-                   "Label %s: sim_value=%.4f, prob_value=%.4f%%\n", 
-                   th_model->clip_ctx->labels[i].c_str(), similarity.item<float>(), similarity_value);
+                   "Label %s: logit_value=%.4f", 
+                   th_model->clip_ctx->labels[i].c_str(), similarity_value);
 
         }
         auto scored_labels = softmax_and_map_to_labels(scores,th_model->clip_ctx->labels);
