@@ -3,6 +3,7 @@
 
 #include <torch/torch.h>
 #include <torch/script.h>
+#include <vector>
 
 struct THClipContext;
 

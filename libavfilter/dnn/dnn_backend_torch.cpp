@@ -23,10 +23,13 @@
  * DNN Torch backend implementation.
  */
 
-#include <torch/torch.h>
-#include <torch/script.h>
-#include <vector>
+#include "config.h"
+
+#if CONFIG_LIBTOKENIZERS
 #include "dnn_backend_torch_clip.h"
+#endif
+
+#include "dnn_backend_torch_common.h"
 
 #define OFFSET(x) offsetof(THOptions, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM

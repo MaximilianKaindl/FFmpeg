@@ -2,11 +2,10 @@
 #define AVFILTER_DNN_TORCH_CLIP_BACKEND_H
 
 #include <string>
-#include <vector>
 #include <memory>
-#include <tokenizers_cpp.h>
 #include "dnn_backend_torch_common.h"
 
+#include <tokenizers_cpp.h>
 using tokenizers::Tokenizer;
 
 typedef struct THClipContext {
@@ -16,10 +15,17 @@ typedef struct THClipContext {
     float logit_scale;
 } THClipContext;
 
+// Core CLIP model functions
 int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx);
-void free_clip_context(THClipContext *clip_ctx);
 int fill_model_input_clip(THModel *th_model, THRequestItem *request, DNNData input);
-int set_params_clip(THModel *th_model, const char **labels, int label_count, const char *tokenizer_path);
-int process_clip_inference(THModel *th_model, THInferRequest *infer_request, const c10::Device& device, DnnContext *ctx);
+int process_clip_inference(THModel *th_model, THInferRequest *infer_request, 
+                         const c10::Device& device, DnnContext *ctx);
+
+// Setup functions
+int set_params_clip(THModel *th_model, const char **labels, int label_count, 
+                   const char *tokenizer_path);
+
+// Cleanup functions                   
+void free_clip_context(THClipContext *clip_ctx);
 
 #endif
