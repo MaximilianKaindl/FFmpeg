@@ -130,32 +130,93 @@ int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx) {
     }
 }
 
-torch::Tensor get_clip_tokens_tensor(THModel *th_model, THRequestItem *request) {
+
+int encode_image_clip(THModel *th_model, THRequestItem *request, const c10::Device& device) {
+    THInferRequest *infer_request = request->infer_request;
+    DnnContext *ctx = th_model->ctx;
+    
+    try {               
+        if (infer_request->input_tensor->device() != device) 
+            *infer_request->input_tensor = infer_request->input_tensor->to(device);
+        
+        // Apply CLIP specific normalization
+        std::vector<double> mean = {0.48145466, 0.4578275, 0.40821073};
+        std::vector<double> std = {0.26862954, 0.26130258, 0.27577711};
+        
+        for (int c = 0; c < 3; c++) {
+            infer_request->input_tensor->select(1, c).sub_(mean[c]).div_(std[c]);
+        }
+
+        // Get image features
+        auto image_features = th_model->jit_model->run_method(
+            "encode_image",
+            *infer_request->input_tensor,
+            true  // normalize
+        );
+
+        if (!image_features.isTensor()) {
+            av_log(ctx, AV_LOG_ERROR, "Model returned invalid non-tensor output\n");
+            return AVERROR(EINVAL);
+        }
+        *infer_request->input_tensor = image_features.toTensor();
+        return 0;
+
+    } catch (const c10::Error& e) {
+        av_log(ctx, AV_LOG_ERROR, "Image encoding error: %s\n", e.what());
+        return AVERROR(EINVAL);
+    }
+}
+
+int encode_text_clip(THModel *th_model, THRequestItem *request, const c10::Device& device) {
+    THInferRequest *infer_request = request->infer_request;
     DnnContext *ctx = th_model->ctx;
     THClipContext *clip_ctx = th_model->clip_ctx;
-
-    if (clip_ctx->labels.empty()) {
-        av_log(ctx, AV_LOG_ERROR, "No labels provided for text encoding\n");
-        return torch::Tensor();
-    }
+    infer_request->text_embeddings = new std::vector<torch::Tensor>();
 
     try {
-        std::vector<torch::Tensor> text_tokens;
-        text_tokens.reserve(clip_ctx->labels.size());
-        
+        infer_request->text_embeddings->reserve(clip_ctx->labels.size());
+
         for (const auto& label : clip_ctx->labels) {
-            auto tokens = get_tokens(th_model, label);
-            if (!tokens.defined()) {
-                av_log(ctx, AV_LOG_ERROR, "Failed to tokenize text: %s\n", label.c_str());
-                return torch::Tensor();
+            torch::Tensor tokens = get_tokens(th_model, label);
+            
+            if (tokens.device() != device) 
+                tokens = tokens.to(device);
+
+            auto text_embedding = th_model->jit_model->run_method(
+                "encode_text",
+                tokens, 
+                true // normalize
+            );
+            
+            if (!text_embedding.isTensor()) {
+                av_log(ctx, AV_LOG_ERROR, "Model returned invalid non-tensor output for text encoding\n");
+                return AVERROR(EINVAL);
             }
-            text_tokens.push_back(tokens);
+            infer_request->text_embeddings->push_back(text_embedding.toTensor());
         }
-        return torch::cat(text_tokens, 0);
-    } catch (const std::exception& e) {
-        av_log(ctx, AV_LOG_ERROR, "Error preparing CLIP inputs: %s\n", e.what());
-        return torch::Tensor();
+        
+        return 0;
+    } catch (const c10::Error& e) {
+        av_log(ctx, AV_LOG_ERROR, "Text encoding error: %s\n", e.what());
+        return AVERROR(EINVAL);
     }
+}
+
+int forward_clip(THModel *th_model, THRequestItem *request, const c10::Device& device)
+{
+    int ret;
+    ret = encode_image_clip(th_model, request, device);
+    if (ret < 0) {
+        av_log(th_model->ctx, AV_LOG_ERROR, "Image encoding failed in CLIP preprocessing\n");
+        return ret;
+    }
+    ret = encode_text_clip(th_model, request, device);
+    if (ret < 0) {
+        av_log(th_model->ctx, AV_LOG_ERROR, "Text encoding failed in CLIP preprocessing\n");
+        return ret;
+    }
+    th_model->clip_ctx->logit_scale = std::exp(std::log(1.0f / 0.07f));
+    return 0;
 }
 
 static void deleter(void *arg)
@@ -167,13 +228,6 @@ int fill_model_input_clip(THModel *th_model, THRequestItem *request, DNNData inp
 {
     DnnContext *ctx = th_model->ctx;
     THInferRequest *infer_request = request->infer_request;
-    *infer_request->input_tensor = torch::from_blob(
-        input.data,
-        {1, 3, 224, 224},
-        deleter, 
-        torch::kFloat32
-    );
-
     *infer_request->output = infer_request->input_tensor->clone().detach();
     // Verify the clone worked
     if (!infer_request->output->defined() || infer_request->output->sizes() != infer_request->input_tensor->sizes()) {
@@ -257,17 +311,9 @@ int set_params_clip(THModel *th_model, const char **labels, int label_count, con
     return 0;
 }
 
-torch::Tensor normalize_features(const torch::Tensor& features, int64_t dim = 1) {
-    return torch::nn::functional::normalize(features, 
-        torch::nn::functional::NormalizeFuncOptions().dim(dim));
-}
-
 torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image_features, const torch::Tensor& text_embedding, float logit_scale, DnnContext *ctx, float temperature = 1.0) {        
-    auto image_f = normalize_features(image_features);
-    auto text_f = normalize_features(text_embedding);
-
     try {
-        auto similarity = torch::matmul(image_f, text_f.transpose(0,1));    
+        auto similarity = torch::matmul(image_features, text_embedding.transpose(0,1));    
         similarity = similarity * logit_scale;      
         return similarity.div(temperature);
     } catch (const c10::Error& e) {
@@ -276,39 +322,10 @@ torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image_featur
     }
 }
 
-
-int extract_clip_outputs(THModel *th_model, THRequestItem *request, const c10::ivalue::Tuple* output) {
-    DnnContext *ctx = th_model->ctx;
-    THInferRequest *infer_request = request->infer_request;
-    try {
-        *infer_request->output = output->elements()[0].toTensor();
-
-        auto text_features = output->elements()[1].toTensor();
-        std::vector<torch::Tensor> text_features_split = text_features.split(1, 0);
-        infer_request->text_embeddings = new std::vector<torch::Tensor>();
-        infer_request->text_embeddings->reserve(text_features_split.size());
-        for (const auto& text_feature : text_features_split) {
-            infer_request->text_embeddings->push_back(text_feature);
-        }
-
-        torch::Tensor logit_tensor = output->elements()[2].toTensor();
-        auto logit_scale = logit_tensor.item<float>();
-        th_model->clip_ctx->logit_scale = std::clamp(logit_scale, 1.0f, 100.0f);
-
-        return 0;
-    } catch (const c10::Error& e) {
-        av_log(ctx, AV_LOG_ERROR, "Torch error extracting CLIP outputs: %s\n", e.what());
-        return AVERROR(EINVAL);
-    } catch (const std::exception& e) {
-        av_log(ctx, AV_LOG_ERROR, "Error extracting CLIP outputs: %s\n", e.what());
-        return AVERROR(EINVAL);
-    }
-}
-
 int process_clip_similarity(THModel *th_model, THRequestItem *request, c10::Device device) {
     DnnContext *ctx = th_model->ctx;
     THInferRequest *infer_request = request->infer_request;
-    auto image_features = infer_request->output;
+    auto image_features = infer_request->input_tensor;
     auto text_embeddings = infer_request->text_embeddings;
 
     std::vector<float> similarity_scores;

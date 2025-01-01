@@ -174,25 +174,14 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     height_idx = dnn_get_height_idx_by_layout(input.layout);
     channel_idx = dnn_get_channel_idx_by_layout(input.layout);
     input.dims[height_idx] = task->in_frame->height;
-    input.dims[width_idx] = task->in_frame->width;        
+    input.dims[width_idx] = task->in_frame->width; 
     input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
                             input.dims[channel_idx] * sizeof(float));
     if (!input.data)
         return AVERROR(ENOMEM);
     infer_request->input_tensor = new torch::Tensor();
     infer_request->output = new torch::Tensor();
-
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    if(th_model->is_clip_model){
-        fill_model_input_clip(th_model, request, input);
-        if (ret < 0) {
-            av_log(ctx, AV_LOG_ERROR, "CLIP preprocessing failed\n");
-            goto err;
-        }
-        return 0;
-    }
-    #endif
-
+    
     switch (th_model->model.func_type) {
         case DFT_PROCESS_FRAME:
         case DFT_ANALYTICS_ZEROSHOTCLASSIFY:
@@ -212,6 +201,18 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     *infer_request->input_tensor = torch::from_blob(input.data,
     {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
     deleter, torch::kFloat32);
+
+    #if (CONFIG_LIBTOKENIZERS == 1)
+    if(th_model->is_clip_model){
+        fill_model_input_clip(th_model, request, input);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "CLIP preprocessing failed\n");
+            goto err;
+        }
+        return 0;
+    }
+    #endif
+    
     return 0;
 
 err:
@@ -250,48 +251,23 @@ static int th_start_inference(void *args)
     }
     // Transfer tensor to the same device as model
     c10::Device device = (*th_model->jit_model->parameters().begin()).device();
-    std::vector<torch::jit::IValue> inputs;
-    if (infer_request->input_tensor->device() != device) 
-        *infer_request->input_tensor = infer_request->input_tensor->to(device);
-    inputs.push_back(*infer_request->input_tensor);
 
     #if (CONFIG_LIBTOKENIZERS == 1)
     if (th_model->is_clip_model) {
-        torch::Tensor tokens = get_clip_tokens_tensor(th_model, request);
-        if (!tokens.defined()) {
-            av_log(ctx, AV_LOG_ERROR, "Failed to generate tokens\n");
-            return AVERROR(EINVAL);
-        }
-        if (tokens.device() != device) {
-            tokens = tokens.to(device);
-        }
-        inputs.push_back(tokens);
-    }
-    #endif
-
-    torch::jit::IValue result_of_inference = th_model->jit_model->forward(inputs);
-
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    if(th_model->is_clip_model){
-        if (!result_of_inference.isTuple()) {
-            av_log(ctx, AV_LOG_ERROR, "Expected tuple output from model\n");
-            return AVERROR(EINVAL);
-        }
-        try {
-            auto result_tuple = result_of_inference.toTuple().get();
-            int ret = extract_clip_outputs(th_model, request, result_tuple);
-            if(ret < 0){
-                return ret;
-            }
-        } catch (const c10::Error& e) {
-            av_log(ctx, AV_LOG_ERROR, "Error processing tuple: %s\n", e.what());
-            return AVERROR(EINVAL);
+        int ret = forward_clip(th_model,request,device);
+        if(ret < 0){
+            return ret;
         }
         return 0;
     }
     #endif
 
-    *infer_request->output = result_of_inference.toTensor();
+    std::vector<torch::jit::IValue> inputs;
+    if (infer_request->input_tensor->device() != device) 
+        *infer_request->input_tensor = infer_request->input_tensor->to(device);
+    inputs.push_back(*infer_request->input_tensor);
+
+    *infer_request->output = th_model->jit_model->forward(inputs).toTensor();
     
     return 0;
 }

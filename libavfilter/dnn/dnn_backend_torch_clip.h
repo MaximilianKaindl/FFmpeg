@@ -6,8 +6,10 @@
 #if (CONFIG_LIBTOKENIZERS == 1)
 #include <string>
 #include <memory>
-
+#include <vector>
+#include <torch/script.h>
 #include <tokenizers_cpp.h>
+
 using tokenizers::Tokenizer;
 
 typedef struct THClipContext {
@@ -17,17 +19,27 @@ typedef struct THClipContext {
     float logit_scale;
 } THClipContext;
 
+// Core CLIP functions
 int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx);
 int fill_model_input_clip(THModel *th_model, THRequestItem *request, DNNData input);
-torch::Tensor get_clip_tokens_tensor(THModel *th_model, THRequestItem *request);
-
+int forward_clip(THModel *th_model, THRequestItem *request, const c10::Device& device);
 int process_clip_similarity(THModel *th_model, THRequestItem *request, c10::Device device);
-int extract_clip_outputs(THModel *th_model, THRequestItem *request, const c10::ivalue::Tuple* output);
 
+// Helper functions
+torch::Tensor get_tokens(THModel *th_model, std::string prompt);
+int create_tokenizer(THModel *th_model, std::string tokenizer_path);
+int encode_image_clip(THModel *th_model, THRequestItem *request, const c10::Device& device);
+int encode_text_clip(THModel *th_model, THRequestItem *request, const c10::Device& device);
+torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image_features, 
+                                             const torch::Tensor& text_embedding,
+                                             float logit_scale,
+                                             DnnContext *ctx,
+                                             float temperature);
+
+// Parameter setting and cleanup
 int set_params_clip(THModel *th_model, const char **labels, int label_count, 
                    const char *tokenizer_path);
-
 void free_clip_context(THClipContext *clip_ctx);
 
-#endif
-#endif
+#endif // CONFIG_LIBTOKENIZERS
+#endif // AVFILTER_DNN_TORCH_CLIP_BACKEND_H
