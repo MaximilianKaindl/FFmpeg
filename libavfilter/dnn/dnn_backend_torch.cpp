@@ -23,13 +23,11 @@
  * DNN Torch backend implementation.
  */
 
-#include "config.h"
+#include "dnn_backend_torch_common.h"
 
 #if (CONFIG_LIBTOKENIZERS == 1)
 #include "dnn_backend_torch_clip.h"
 #endif
-
-#include "dnn_backend_torch_common.h"
 
 #define OFFSET(x) offsetof(THOptions, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM
@@ -281,7 +279,10 @@ static int th_start_inference(void *args)
         }
         try {
             auto result_tuple = result_of_inference.toTuple().get();
-            extract_clip_outputs(th_model, request, result_tuple);
+            int ret = extract_clip_outputs(th_model, request, result_tuple);
+            if(ret < 0){
+                return ret;
+            }
         } catch (const c10::Error& e) {
             av_log(ctx, AV_LOG_ERROR, "Error processing tuple: %s\n", e.what());
             return AVERROR(EINVAL);
@@ -308,13 +309,13 @@ static void infer_completion_callback(void *args) {
 
     #if (CONFIG_LIBTOKENIZERS == 1)
     if(th_model->is_clip_model){
-        //Clip does not change the input
-        task->out_frame = av_frame_clone(task->in_frame);
         int ret = process_clip_similarity(th_model,request,output->device());
         if(ret < 0){
             av_log(th_model->ctx, AV_LOG_ERROR, "Unable to process clip inference.\n");
             goto err;
         }
+        //Clip does not change the input
+        task->out_frame = av_frame_clone(task->in_frame);
         task->inference_done++;
         av_freep(&request->lltask);
         return;
