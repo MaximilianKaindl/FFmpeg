@@ -86,6 +86,13 @@ int ff_dnn_init(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *fil
         if (ctx->model_outputnames)
             av_log(filter_ctx, AV_LOG_WARNING, "LibTorch backend do not require outputname(s), "\
                                                "all outputname(s) will be ignored.\n");
+                                               
+        #if (CONFIG_LIBTOKENIZERS == 0)
+        if(func_type == DFT_ANALYTICS_ZEROSHOTCLASSIFY) {
+            av_log(ctx, AV_LOG_ERROR, "tokenizers-cpp is not included. Clip Classification requires tokenizers-cpp library. Include it with configure.\n");
+            return AVERROR(EINVAL);
+        }
+        #endif
         ctx->nb_outputs = 1;
     } else if (backend == DNN_TF) {
         if (!ctx->model_inputname) {

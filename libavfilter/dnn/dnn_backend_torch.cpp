@@ -620,13 +620,6 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
     }
     #endif
 
-    #if (CONFIG_LIBTOKENIZERS == 0)
-        if(model->func_type == DFT_ANALYTICS_ZEROSHOTCLASSIFY) {
-            av_log(ctx, AV_LOG_ERROR, "tokenizers-cpp is not included. Clip Classification requires tokenizers-cpp library. Include it with configure.\n");
-            return AVERROR(AVERROR_EXIT);
-        }
-    #endif
-
     return execute_model_th(request, th_model->lltask_queue);
 }
 
