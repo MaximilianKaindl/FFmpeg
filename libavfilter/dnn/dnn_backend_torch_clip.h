@@ -1,10 +1,11 @@
 #ifndef AVFILTER_DNN_TORCH_CLIP_BACKEND_H
 #define AVFILTER_DNN_TORCH_CLIP_BACKEND_H
 
-#if CONFIG_LIBTOKENIZERS
+#include "dnn_backend_torch_common.h"
+
+#if (CONFIG_LIBTOKENIZERS == 1)
 #include <string>
 #include <memory>
-#include "dnn_backend_torch_common.h"
 
 #include <tokenizers_cpp.h>
 using tokenizers::Tokenizer;

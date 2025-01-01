@@ -1,6 +1,5 @@
 #include "dnn_backend_torch_clip.h"
-#if CONFIG_LIBTOKENIZERS
-#include "dnn_backend_common.h"
+#if (CONFIG_LIBTOKENIZERS == 1)
 
 extern "C" {
 #include "libavutil/mem.h"

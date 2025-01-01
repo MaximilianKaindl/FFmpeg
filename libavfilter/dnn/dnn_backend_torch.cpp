@@ -25,7 +25,7 @@
 
 #include "config.h"
 
-#if CONFIG_LIBTOKENIZERS
+#if (CONFIG_LIBTOKENIZERS == 1)
 #include "dnn_backend_torch_clip.h"
 #endif
 
@@ -71,7 +71,7 @@ static void th_free_request(THInferRequest *request)
         request->input_tensor = NULL;
     }
 
-    #if CONFIG_LIBTOKENIZERS
+    #if (CONFIG_LIBTOKENIZERS == 1)
     if (request->text_embeddings) {
         delete(request->text_embeddings);
         request->text_embeddings = NULL;    
@@ -123,7 +123,7 @@ static void dnn_free_model_th(DNNModel **model)
     ff_queue_destroy(th_model->task_queue);
     delete th_model->jit_model;
 
-    #if CONFIG_LIBTOKENIZERS
+    #if (CONFIG_LIBTOKENIZERS == 1)
     if (th_model->is_clip_model) {
         free_clip_context(th_model->clip_ctx);
     }
@@ -184,7 +184,7 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     infer_request->input_tensor = new torch::Tensor();
     infer_request->output = new torch::Tensor();
 
-    #if CONFIG_LIBTOKENIZERS
+    #if (CONFIG_LIBTOKENIZERS == 1)
     if(th_model->is_clip_model){
         fill_model_input_clip(th_model, request, input);
         if (ret < 0) {
@@ -257,7 +257,7 @@ static int th_start_inference(void *args)
         *infer_request->input_tensor = infer_request->input_tensor->to(device);
     inputs.push_back(*infer_request->input_tensor);
 
-    #if CONFIG_LIBTOKENIZERS
+    #if (CONFIG_LIBTOKENIZERS == 1)
     if (th_model->is_clip_model) {
         torch::Tensor tokens = get_clip_tokens_tensor(th_model, request);
         if (!tokens.defined()) {
@@ -273,7 +273,7 @@ static int th_start_inference(void *args)
 
     torch::jit::IValue result_of_inference = th_model->jit_model->forward(inputs);
 
-    #if CONFIG_LIBTOKENIZERS
+    #if (CONFIG_LIBTOKENIZERS == 1)
     if(th_model->is_clip_model){
         if (!result_of_inference.isTuple()) {
             av_log(ctx, AV_LOG_ERROR, "Expected tuple output from model\n");
@@ -306,7 +306,7 @@ static void infer_completion_callback(void *args) {
 
     c10::IntArrayRef sizes = output->sizes();
 
-    #if CONFIG_LIBTOKENIZERS
+    #if (CONFIG_LIBTOKENIZERS == 1)
     if(th_model->is_clip_model){
         //Clip does not change the input
         task->out_frame = av_frame_clone(task->in_frame);
@@ -317,6 +317,7 @@ static void infer_completion_callback(void *args) {
         }
         task->inference_done++;
         av_freep(&request->lltask);
+        return;
     }
     #endif
 
@@ -464,7 +465,7 @@ static THInferRequest *th_create_inference_request(void)
     request->input_tensor = NULL;
     request->output = NULL;
 
-    #if CONFIG_LIBTOKENIZERS
+    #if (CONFIG_LIBTOKENIZERS == 1)
     request->text_embeddings = NULL;
     #endif
 
@@ -501,7 +502,7 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         (*th_model->jit_model) = torch::jit::load(ctx->model_filename);
         th_model->jit_model->to(device);
 
-        #if CONFIG_LIBTOKENIZERS
+        #if (CONFIG_LIBTOKENIZERS == 1)
         // Check if this is a CLIP model and initialize accordingly
         if (func_type != DFT_ANALYTICS_ZEROSHOTCLASSIFY || init_clip_model(th_model,filter_ctx) < 0) {
             // Not a CLIP model or initialization failed
@@ -609,7 +610,7 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
         return AVERROR(EINVAL);
     }
 
-    #if CONFIG_LIBTOKENIZERS
+    #if (CONFIG_LIBTOKENIZERS == 1)
     if(model->func_type == DFT_ANALYTICS_ZEROSHOTCLASSIFY) {
         DNNExecZeroShotClassificationParams *params = (DNNExecZeroShotClassificationParams *) exec_params;
         ret = set_params_clip(th_model, params->labels, params->label_count, params->tokenizer_path);
