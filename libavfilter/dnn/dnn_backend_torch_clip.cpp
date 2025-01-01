@@ -1,4 +1,5 @@
 #include "dnn_backend_torch_clip.h"
+#if CONFIG_LIBTOKENIZERS
 #include "dnn_backend_common.h"
 
 extern "C" {
@@ -344,7 +345,8 @@ void free_clip_context(THClipContext *clip_ctx) {
     if (!clip_ctx)
         return;
         
-    clip_ctx->tokenizer.reset();
     clip_ctx->labels.clear();
-    clip_ctx->tokenizer_path.clear();
+    clip_ctx->tokenizer.release();
+    av_freep(clip_ctx);
 }
+#endif

@@ -1,6 +1,7 @@
 #ifndef AVFILTER_DNN_TORCH_CLIP_BACKEND_H
 #define AVFILTER_DNN_TORCH_CLIP_BACKEND_H
 
+#if CONFIG_LIBTOKENIZERS
 #include <string>
 #include <memory>
 #include "dnn_backend_torch_common.h"
@@ -27,4 +28,5 @@ int set_params_clip(THModel *th_model, const char **labels, int label_count,
 
 void free_clip_context(THClipContext *clip_ctx);
 
+#endif
 #endif

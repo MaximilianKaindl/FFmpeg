@@ -23,14 +23,22 @@ typedef struct THModel {
     SafeQueue *request_queue;
     Queue *task_queue;
     Queue *lltask_queue;
+
+    #if CONFIG_LIBTOKENIZERS
     bool is_clip_model; 
     THClipContext *clip_ctx;
+    #endif
+
 } THModel;
 
 typedef struct THInferRequest {
     torch::Tensor *output;
     torch::Tensor *input_tensor;
+    
+    #if CONFIG_LIBTOKENIZERS
     std::vector<torch::Tensor> *text_embeddings;
+    #endif
+    
 } THInferRequest;
 
 typedef struct THRequestItem {

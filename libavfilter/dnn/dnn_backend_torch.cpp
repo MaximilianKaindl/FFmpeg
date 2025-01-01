@@ -70,10 +70,14 @@ static void th_free_request(THInferRequest *request)
         delete(request->input_tensor);
         request->input_tensor = NULL;
     }
+
+    #if CONFIG_LIBTOKENIZERS
     if (request->text_embeddings) {
         delete(request->text_embeddings);
         request->text_embeddings = NULL;    
     }
+    #endif
+
     return;
 }
 
@@ -118,10 +122,13 @@ static void dnn_free_model_th(DNNModel **model)
     }
     ff_queue_destroy(th_model->task_queue);
     delete th_model->jit_model;
+
+    #if CONFIG_LIBTOKENIZERS
     if (th_model->is_clip_model) {
-        th_model->clip_ctx->tokenizer.release();
-        av_freep(&th_model->clip_ctx);
+        free_clip_context(th_model->clip_ctx);
     }
+    #endif
+
     av_freep(&th_model);
     *model = NULL;
 }
@@ -176,7 +183,18 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
         return AVERROR(ENOMEM);
     infer_request->input_tensor = new torch::Tensor();
     infer_request->output = new torch::Tensor();
-    
+
+    #if CONFIG_LIBTOKENIZERS
+    if(th_model->is_clip_model){
+        fill_model_input_clip(th_model, request, input);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "CLIP preprocessing failed\n");
+            goto err;
+        }
+        return 0;
+    }
+    #endif
+
     switch (th_model->model.func_type) {
         case DFT_PROCESS_FRAME:
         case DFT_ANALYTICS_ZEROSHOTCLASSIFY:
@@ -192,14 +210,6 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
         default:
             avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
             break;
-    }
-    if(th_model->is_clip_model){
-        fill_model_input_clip(th_model, request, input);
-        if (ret < 0) {
-            av_log(ctx, AV_LOG_ERROR, "CLIP preprocessing failed\n");
-            goto err;
-        }
-        return 0;
     }
     *infer_request->input_tensor = torch::from_blob(input.data,
     {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
@@ -247,6 +257,7 @@ static int th_start_inference(void *args)
         *infer_request->input_tensor = infer_request->input_tensor->to(device);
     inputs.push_back(*infer_request->input_tensor);
 
+    #if CONFIG_LIBTOKENIZERS
     if (th_model->is_clip_model) {
         torch::Tensor tokens = get_clip_tokens_tensor(th_model, request);
         if (!tokens.defined()) {
@@ -258,9 +269,11 @@ static int th_start_inference(void *args)
         }
         inputs.push_back(tokens);
     }
-    
+    #endif
+
     torch::jit::IValue result_of_inference = th_model->jit_model->forward(inputs);
 
+    #if CONFIG_LIBTOKENIZERS
     if(th_model->is_clip_model){
         if (!result_of_inference.isTuple()) {
             av_log(ctx, AV_LOG_ERROR, "Expected tuple output from model\n");
@@ -273,10 +286,12 @@ static int th_start_inference(void *args)
             av_log(ctx, AV_LOG_ERROR, "Error processing tuple: %s\n", e.what());
             return AVERROR(EINVAL);
         }
+        return 0;
     }
-    else{
-        *infer_request->output = result_of_inference.toTensor();
-    }
+    #endif
+
+    *infer_request->output = result_of_inference.toTensor();
+    
     return 0;
 }
 
@@ -288,9 +303,10 @@ static void infer_completion_callback(void *args) {
     THInferRequest *infer_request = request->infer_request;
     THModel *th_model = (THModel *)task->model;
     torch::Tensor *output = infer_request->output;
-    
+
     c10::IntArrayRef sizes = output->sizes();
 
+    #if CONFIG_LIBTOKENIZERS
     if(th_model->is_clip_model){
         //Clip does not change the input
         task->out_frame = av_frame_clone(task->in_frame);
@@ -302,6 +318,7 @@ static void infer_completion_callback(void *args) {
         task->inference_done++;
         av_freep(&request->lltask);
     }
+    #endif
 
     outputs.order = DCO_RGB;
     outputs.layout = DL_NCHW;
@@ -320,7 +337,6 @@ static void infer_completion_callback(void *args) {
 
     switch (th_model->model.func_type) {
     case DFT_PROCESS_FRAME:
-    case DFT_ANALYTICS_ZEROSHOTCLASSIFY:
         if (task->do_ioproc) {
             // Post process can only deal with CPU memory.
             if (output->device() != torch::kCPU)
@@ -447,7 +463,11 @@ static THInferRequest *th_create_inference_request(void)
     }
     request->input_tensor = NULL;
     request->output = NULL;
+
+    #if CONFIG_LIBTOKENIZERS
     request->text_embeddings = NULL;
+    #endif
+
     return request;
 }
 
@@ -481,11 +501,14 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         (*th_model->jit_model) = torch::jit::load(ctx->model_filename);
         th_model->jit_model->to(device);
 
+        #if CONFIG_LIBTOKENIZERS
         // Check if this is a CLIP model and initialize accordingly
         if (func_type != DFT_ANALYTICS_ZEROSHOTCLASSIFY || init_clip_model(th_model,filter_ctx) < 0) {
             // Not a CLIP model or initialization failed
             th_model->is_clip_model = false;
         }
+        #endif
+
     } catch (const c10::Error& e) {
         av_log(ctx, AV_LOG_ERROR, "Failed to load torch model\n");
         goto fail;
@@ -585,6 +608,8 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
         av_log(ctx, AV_LOG_ERROR, "unable to get infer request.\n");
         return AVERROR(EINVAL);
     }
+
+    #if CONFIG_LIBTOKENIZERS
     if(model->func_type == DFT_ANALYTICS_ZEROSHOTCLASSIFY) {
         DNNExecZeroShotClassificationParams *params = (DNNExecZeroShotClassificationParams *) exec_params;
         ret = set_params_clip(th_model, params->labels, params->label_count, params->tokenizer_path);
@@ -593,6 +618,14 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
             return ret;
         }
     }
+    #endif
+
+    #if (CONFIG_LIBTOKENIZERS == 0)
+        if(model->func_type == DFT_ANALYTICS_ZEROSHOTCLASSIFY) {
+            av_log(ctx, AV_LOG_ERROR, "tokenizers-cpp is not included. Clip Classification requires tokenizers-cpp library. Include it with configure.\n");
+            return AVERROR(AVERROR_EXIT);
+        }
+    #endif
 
     return execute_model_th(request, th_model->lltask_queue);
 }
