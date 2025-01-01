@@ -15,17 +15,16 @@ typedef struct THClipContext {
     float logit_scale;
 } THClipContext;
 
-// Core CLIP model functions
 int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx);
 int fill_model_input_clip(THModel *th_model, THRequestItem *request, DNNData input);
-int process_clip_inference(THModel *th_model, THInferRequest *infer_request, 
-                         const c10::Device& device, DnnContext *ctx);
+torch::Tensor get_clip_tokens_tensor(THModel *th_model, THRequestItem *request);
 
-// Setup functions
+int process_clip_similarity(THModel *th_model, THRequestItem *request, c10::Device device);
+int extract_clip_outputs(THModel *th_model, THRequestItem *request, const c10::ivalue::Tuple* output);
+
 int set_params_clip(THModel *th_model, const char **labels, int label_count, 
                    const char *tokenizer_path);
 
-// Cleanup functions                   
 void free_clip_context(THClipContext *clip_ctx);
 
 #endif

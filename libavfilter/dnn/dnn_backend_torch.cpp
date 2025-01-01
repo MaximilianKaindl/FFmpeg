@@ -72,7 +72,7 @@ static void th_free_request(THInferRequest *request)
     }
     if (request->text_embeddings) {
         delete(request->text_embeddings);
-        request->text_embeddings = NULL;
+        request->text_embeddings = NULL;    
     }
     return;
 }
@@ -242,15 +242,40 @@ static int th_start_inference(void *args)
     }
     // Transfer tensor to the same device as model
     c10::Device device = (*th_model->jit_model->parameters().begin()).device();
-    if (th_model->is_clip_model) {
-        return process_clip_inference(th_model, infer_request, device, ctx);
-    } else {
-        std::vector<torch::jit::IValue> inputs;
-        if (infer_request->input_tensor->device() != device) 
-            *infer_request->input_tensor = infer_request->input_tensor->to(device);
-        inputs.push_back(*infer_request->input_tensor);
+    std::vector<torch::jit::IValue> inputs;
+    if (infer_request->input_tensor->device() != device) 
+        *infer_request->input_tensor = infer_request->input_tensor->to(device);
+    inputs.push_back(*infer_request->input_tensor);
 
-        *infer_request->output = th_model->jit_model->forward(inputs).toTensor();
+    if (th_model->is_clip_model) {
+        torch::Tensor tokens = get_clip_tokens_tensor(th_model, request);
+        if (!tokens.defined()) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to generate tokens\n");
+            return AVERROR(EINVAL);
+        }
+        if (tokens.device() != device) {
+            tokens = tokens.to(device);
+        }
+        inputs.push_back(tokens);
+    }
+    
+    torch::jit::IValue result_of_inference = th_model->jit_model->forward(inputs);
+
+    if(th_model->is_clip_model){
+        if (!result_of_inference.isTuple()) {
+            av_log(ctx, AV_LOG_ERROR, "Expected tuple output from model\n");
+            return AVERROR(EINVAL);
+        }
+        try {
+            auto result_tuple = result_of_inference.toTuple().get();
+            extract_clip_outputs(th_model, request, result_tuple);
+        } catch (const c10::Error& e) {
+            av_log(ctx, AV_LOG_ERROR, "Error processing tuple: %s\n", e.what());
+            return AVERROR(EINVAL);
+        }
+    }
+    else{
+        *infer_request->output = result_of_inference.toTensor();
     }
     return 0;
 }
@@ -263,8 +288,21 @@ static void infer_completion_callback(void *args) {
     THInferRequest *infer_request = request->infer_request;
     THModel *th_model = (THModel *)task->model;
     torch::Tensor *output = infer_request->output;
-
+    
     c10::IntArrayRef sizes = output->sizes();
+
+    if(th_model->is_clip_model){
+        //Clip does not change the input
+        task->out_frame = av_frame_clone(task->in_frame);
+        int ret = process_clip_similarity(th_model,request,output->device());
+        if(ret < 0){
+            av_log(th_model->ctx, AV_LOG_ERROR, "Unable to process clip inference.\n");
+            goto err;
+        }
+        task->inference_done++;
+        av_freep(&request->lltask);
+    }
+
     outputs.order = DCO_RGB;
     outputs.layout = DL_NCHW;
     outputs.dt = DNN_FLOAT;
@@ -292,10 +330,6 @@ static void infer_completion_callback(void *args) {
             if (th_model->model.frame_post_proc != NULL) {
                 th_model->model.frame_post_proc(task->out_frame, &outputs, th_model->model.filter_ctx);
             } else {
-                if(th_model->is_clip_model){
-                    //Clip does not change the input
-                    task->out_frame = av_frame_clone(task->in_frame);
-                }
                 ff_proc_from_dnn_to_frame(task->out_frame, &outputs, th_model->ctx);
             }
         } else {
@@ -448,7 +482,7 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         th_model->jit_model->to(device);
 
         // Check if this is a CLIP model and initialize accordingly
-        if (func_type == DFT_ANALYTICS_ZEROSHOTCLASSIFY && init_clip_model(th_model,filter_ctx) < 0) {
+        if (func_type != DFT_ANALYTICS_ZEROSHOTCLASSIFY || init_clip_model(th_model,filter_ctx) < 0) {
             // Not a CLIP model or initialization failed
             th_model->is_clip_model = false;
         }
