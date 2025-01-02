@@ -7,7 +7,7 @@ extern "C" {
 #include "libavutil/log.h"
 }
 
-torch::Tensor get_tokens(THModel *th_model, std::string prompt) {
+torch::Tensor get_tokens(const THModel *th_model, const std::string& prompt) {
     DnnContext *ctx = th_model->ctx;
     //TODO : Load Special Tokens from tokenizer
     const int expected_length = 77;  // CLIP's standard sequence length
@@ -64,7 +64,7 @@ torch::Tensor get_tokens(THModel *th_model, std::string prompt) {
     }
 }
 
-int load_bytes_from_file(const std::string& path, std::string& data, void* log_ctx) {
+int load_bytes_from_file(const std::string& path, std::string& data, DnnContext* log_ctx) {
     std::ifstream fs(path, std::ios::in | std::ios::binary);
     if (fs.fail()) {
         av_log(log_ctx, AV_LOG_ERROR, "Cannot open file: %s\n", path.c_str());
@@ -97,7 +97,7 @@ int load_bytes_from_file(const std::string& path, std::string& data, void* log_c
     }
 }
 
-int create_tokenizer(THModel *th_model, std::string tokenizer_path) {
+int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path) {
     std::string blob;
     int ret = load_bytes_from_file(tokenizer_path, blob, th_model->ctx);
     if (ret < 0) {
@@ -113,10 +113,11 @@ int create_tokenizer(THModel *th_model, std::string tokenizer_path) {
     }
 }
 
-int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx) {
+int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx) {
     try {
-        th_model->jit_model->get_method("encode_image");
-        th_model->jit_model->get_method("encode_text");
+        //Should throw exception if not existing
+        auto encode_image = th_model->jit_model->get_method("encode_image");
+        auto encode_text = th_model->jit_model->get_method("encode_text");
         th_model->is_clip_model = true;
         th_model->clip_ctx = (THClipContext *)av_mallocz(sizeof(THClipContext));
         av_log(th_model->ctx, AV_LOG_INFO, 
@@ -131,7 +132,7 @@ int init_clip_model(THModel *th_model, AVFilterContext *filter_ctx) {
 }
 
 
-int encode_image_clip(THModel *th_model, THRequestItem *request, const c10::Device& device) {
+int encode_image_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device) {
     THInferRequest *infer_request = request->infer_request;
     DnnContext *ctx = th_model->ctx;
     
@@ -166,7 +167,7 @@ int encode_image_clip(THModel *th_model, THRequestItem *request, const c10::Devi
     }
 }
 
-int encode_text_clip(THModel *th_model, THRequestItem *request, const c10::Device& device) {
+int encode_text_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device) {
     THInferRequest *infer_request = request->infer_request;
     DnnContext *ctx = th_model->ctx;
     THClipContext *clip_ctx = th_model->clip_ctx;
@@ -201,7 +202,7 @@ int encode_text_clip(THModel *th_model, THRequestItem *request, const c10::Devic
     }
 }
 
-int forward_clip(THModel *th_model, THRequestItem *request, const c10::Device& device)
+int forward_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device)
 {
     int ret;
     ret = encode_image_clip(th_model, request, device);
@@ -218,7 +219,7 @@ int forward_clip(THModel *th_model, THRequestItem *request, const c10::Device& d
     return 0;
 }
 
-int fill_model_input_clip(THModel *th_model, THRequestItem *request, DNNData input) 
+int fill_model_input_clip(const THModel *th_model, const THRequestItem *request, const DNNData& input)
 {
     DnnContext *ctx = th_model->ctx;
     THInferRequest *infer_request = request->infer_request;
@@ -239,8 +240,8 @@ int fill_model_input_clip(THModel *th_model, THRequestItem *request, DNNData inp
 }
 
 std::vector<std::pair<float, std::string>> softmax_and_map_to_labels(const std::vector<float>& scores, const std::vector<std::string>& labels) {
-    torch::Tensor scores_tensor = torch::tensor(scores);
-    torch::Tensor softmax_scores = torch::softmax(scores_tensor, 0);
+    const torch::Tensor scores_tensor = torch::tensor(scores);
+    const torch::Tensor softmax_scores = torch::softmax(scores_tensor, 0);
     
     std::vector<std::pair<float, std::string>> scored_labels;
     scored_labels.reserve(scores.size());
@@ -262,7 +263,8 @@ std::vector<std::pair<float, std::string>> softmax_and_map_to_labels(const std::
 }
 
 
-void print_clip_similarity_scores(THModel *th_model, const std::vector<std::pair<float, std::string>>& scored_labels, DnnContext *ctx) {
+void print_clip_similarity_scores(const THModel *th_model, const std::vector<std::pair<float, std::string>>& scored_labels) {
+    DnnContext *ctx = th_model->ctx;
     try {
         av_log(ctx, AV_LOG_INFO, "\nCLIP Analysis Results:\n");
         for (auto& scored_label : scored_labels) {
@@ -288,7 +290,7 @@ void print_clip_similarity_scores(THModel *th_model, const std::vector<std::pair
         av_log(ctx, AV_LOG_ERROR, "Error processing similarity scores: %s\n", e.what());
     }
 }
-int set_params_clip(THModel *th_model, const char **labels, int label_count, const char *tokenizer_path) {
+int set_params_clip(const THModel *th_model, const char **labels, const int& label_count, const char *tokenizer_path) {
     if (!th_model || !labels || label_count <= 0) {
         return AVERROR(EINVAL);
     }
@@ -297,7 +299,7 @@ int set_params_clip(THModel *th_model, const char **labels, int label_count, con
     
     for (int i = 0; i < label_count; i++) {
         if (labels[i]) {
-            label_vector.push_back(std::string(labels[i]));
+            label_vector.emplace_back(labels[i]);
         }
     }
     th_model->clip_ctx->labels = label_vector;
@@ -305,18 +307,18 @@ int set_params_clip(THModel *th_model, const char **labels, int label_count, con
     return 0;
 }
 
-torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image_features, const torch::Tensor& text_embedding, float logit_scale, DnnContext *ctx, float temperature = 1.0) {        
+torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image_features, const torch::Tensor& text_embedding, const float& logit_scale, DnnContext *ctx, float temperature = 1.0) {
     try {
         auto similarity = torch::matmul(image_features, text_embedding.transpose(0,1));    
         similarity = similarity * logit_scale;      
         return similarity.div(temperature);
     } catch (const c10::Error& e) {
         av_log(ctx, AV_LOG_ERROR, "Similarity computation failed: %s\n", e.what());
-        return torch::Tensor();
+        return {};
     }
 }
 
-int process_clip_similarity(THModel *th_model, THRequestItem *request, c10::Device device) {
+int process_clip_similarity(const THModel *th_model, const THRequestItem *request,const c10::Device& device) {
     DnnContext *ctx = th_model->ctx;
     THInferRequest *infer_request = request->infer_request;
     auto image_features = infer_request->input_tensor;
@@ -339,7 +341,7 @@ int process_clip_similarity(THModel *th_model, THRequestItem *request, c10::Devi
         }
 
         auto scored_labels = softmax_and_map_to_labels(similarity_scores, th_model->clip_ctx->labels);
-        print_clip_similarity_scores(th_model, scored_labels, ctx);
+        print_clip_similarity_scores(th_model, scored_labels);
         return 0;
 
     } catch (const c10::Error& e) {
