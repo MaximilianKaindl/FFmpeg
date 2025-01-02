@@ -175,6 +175,13 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     channel_idx = dnn_get_channel_idx_by_layout(input.layout);
     input.dims[height_idx] = task->in_frame->height;
     input.dims[width_idx] = task->in_frame->width; 
+    #if (CONFIG_LIBTOKENIZERS == 1)
+    //TODO not working atm use-pix_fmt rgb24 -vf scale=224:224
+    if(th_model->is_clip_model){
+        input.dims[height_idx] = 224; 
+        input.dims[width_idx] = 224;
+    }
+    #endif
     input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
                             input.dims[channel_idx] * sizeof(float));
     if (!input.data)

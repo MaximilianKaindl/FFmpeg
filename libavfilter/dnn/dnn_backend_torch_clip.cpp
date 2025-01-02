@@ -140,12 +140,11 @@ int encode_image_clip(THModel *th_model, THRequestItem *request, const c10::Devi
             *infer_request->input_tensor = infer_request->input_tensor->to(device);
         
         // Apply CLIP specific normalization
-        std::vector<double> mean = {0.48145466, 0.4578275, 0.40821073};
-        std::vector<double> std = {0.26862954, 0.26130258, 0.27577711};
+        auto options = torch::TensorOptions().dtype(torch::kFloat32);
+        auto mean = torch::tensor({0.48145466, 0.4578275, 0.40821073}, options).view({1, 3, 1, 1});
+        auto std = torch::tensor({0.26862954, 0.26130258, 0.27577711}, options).view({1, 3, 1, 1});
         
-        for (int c = 0; c < 3; c++) {
-            infer_request->input_tensor->select(1, c).sub_(mean[c]).div_(std[c]);
-        }
+        *infer_request->input_tensor = (*infer_request->input_tensor - mean) / std;
 
         // Get image features
         auto image_features = th_model->jit_model->run_method(
@@ -217,11 +216,6 @@ int forward_clip(THModel *th_model, THRequestItem *request, const c10::Device& d
     }
     th_model->clip_ctx->logit_scale = std::exp(std::log(1.0f / 0.07f));
     return 0;
-}
-
-static void deleter(void *arg)
-{
-    av_freep(&arg);
 }
 
 int fill_model_input_clip(THModel *th_model, THRequestItem *request, DNNData input) 
