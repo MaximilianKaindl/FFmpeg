@@ -25,7 +25,7 @@ extern "C" {
 #include "libavutil/log.h"
 }
 
-torch::Tensor get_tokens(const THModel *th_model, const std::string& prompt) {
+static torch::Tensor get_tokens(const THModel *th_model, const std::string& prompt) {
     DnnContext *ctx = th_model->ctx;
     //TODO : Load Special Tokens from tokenizer
     const int expected_length = 77;  // CLIP's standard sequence length
@@ -82,7 +82,7 @@ torch::Tensor get_tokens(const THModel *th_model, const std::string& prompt) {
     }
 }
 
-int load_bytes_from_file(const std::string& path, std::string& data, DnnContext* log_ctx) {
+static int load_bytes_from_file(const std::string& path, std::string& data, DnnContext* log_ctx) {
     std::ifstream fs(path, std::ios::in | std::ios::binary);
     if (fs.fail()) {
         av_log(log_ctx, AV_LOG_ERROR, "Cannot open file: %s\n", path.c_str());
@@ -257,7 +257,7 @@ int fill_model_input_clip(const THModel *th_model, const THRequestItem *request,
     return 0;
 }
 
-std::vector<std::pair<float, std::string>> softmax_and_map_to_labels(const std::vector<float>& scores, const std::vector<std::string>& labels) {
+static std::vector<std::pair<float, std::string>> softmax_and_map_to_labels(const std::vector<float>& scores, const std::vector<std::string>& labels) {
     const torch::Tensor scores_tensor = torch::tensor(scores);
     const torch::Tensor softmax_scores = torch::softmax(scores_tensor, 0);
     
@@ -281,7 +281,7 @@ std::vector<std::pair<float, std::string>> softmax_and_map_to_labels(const std::
 }
 
 
-void print_clip_similarity_scores(const THModel *th_model, const std::vector<std::pair<float, std::string>>& scored_labels) {
+static void print_clip_similarity_scores(const THModel *th_model, const std::vector<std::pair<float, std::string>>& scored_labels) {
     DnnContext *ctx = th_model->ctx;
     try {
         av_log(ctx, AV_LOG_INFO, "\nCLIP Analysis Results:\n");
@@ -308,6 +308,53 @@ void print_clip_similarity_scores(const THModel *th_model, const std::vector<std
         av_log(ctx, AV_LOG_ERROR, "Error processing similarity scores: %s\n", e.what());
     }
 }
+static void store_clip_results_to_frame(AVFrame *frame,
+                                      const std::vector<std::pair<float, std::string>>& scored_labels,
+                                      void *log_ctx) {
+    constexpr int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
+    const int num_of_labels = scored_labels.size();
+    int num_bboxes = (num_of_labels + max_classes_per_box - 1) / max_classes_per_box;
+
+    // Create or get side data with enough space for all bboxes
+    AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
+    if (!sd) {
+        sd = av_frame_new_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES,
+                                   sizeof(AVDetectionBBoxHeader) +
+                                   num_bboxes * sizeof(AVDetectionBBox));
+        if (!sd) {
+            av_log(log_ctx, AV_LOG_ERROR, "Failed to allocate side data\n");
+            return;
+        }
+    }
+
+    AVDetectionBBoxHeader *header = (AVDetectionBBoxHeader *)sd->data;
+    header->nb_bboxes = num_bboxes;
+    header->bbox_size = sizeof(AVDetectionBBox);
+    snprintf(header->source, sizeof(header->source), "clip");
+
+    for (int i = 0; i < num_bboxes; i++) {
+        AVDetectionBBox *bbox = av_get_detection_bbox(header, i);
+        // Each bbox covers the whole frame
+        bbox->x = 0;
+        bbox->y = 0;
+        bbox->w = frame->width;
+        bbox->h = frame->height;
+        bbox->classify_count = 0;
+
+        // Fill this bbox with up to max_classes_per_box classifications
+        const int start_idx = i * max_classes_per_box;
+        const int end_idx = std::min(num_of_labels, (i + 1) * max_classes_per_box);
+
+        for (int j = start_idx; j < end_idx; j++) {
+            bbox->classify_confidences[bbox->classify_count] =
+                av_make_q(static_cast<int>(scored_labels[j].first * 100), 100);
+            snprintf(bbox->classify_labels[bbox->classify_count],
+                    sizeof(bbox->classify_labels[0]),
+                    "%s", scored_labels[j].second.c_str());
+            bbox->classify_count++;
+        }
+    }
+}
 int set_params_clip(const THModel *th_model, const char **labels, const int& label_count, const char *tokenizer_path) {
     if (!th_model || !labels || label_count <= 0) {
         return AVERROR(EINVAL);
@@ -325,7 +372,7 @@ int set_params_clip(const THModel *th_model, const char **labels, const int& lab
     return 0;
 }
 
-torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image_features, const torch::Tensor& text_embedding, const float& logit_scale, DnnContext *ctx, float temperature = 1.0) {
+static torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image_features, const torch::Tensor& text_embedding, const float& logit_scale, DnnContext *ctx, float temperature = 1.0) {
     try {
         auto similarity = torch::matmul(image_features, text_embedding.transpose(0,1));    
         similarity = similarity * logit_scale;      
@@ -339,6 +386,9 @@ torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image_featur
 int process_clip_similarity(const THModel *th_model, const THRequestItem *request,const c10::Device& device) {
     DnnContext *ctx = th_model->ctx;
     THInferRequest *infer_request = request->infer_request;
+    LastLevelTaskItem *lltask = request->lltask;
+    TaskItem *task = lltask->task;
+    AVFrame *frame = task->in_frame;
     auto image_features = infer_request->input_tensor;
     auto text_embeddings = infer_request->text_embeddings;
 
@@ -359,7 +409,8 @@ int process_clip_similarity(const THModel *th_model, const THRequestItem *reques
         }
 
         auto scored_labels = softmax_and_map_to_labels(similarity_scores, th_model->clip_ctx->labels);
-        print_clip_similarity_scores(th_model, scored_labels);
+        store_clip_results_to_frame(frame,scored_labels,ctx);
+        //print_clip_similarity_scores(th_model, scored_labels);
         return 0;
 
     } catch (const c10::Error& e) {

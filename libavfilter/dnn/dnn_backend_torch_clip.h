@@ -27,6 +27,10 @@
 #include <torch/script.h>
 #include <tokenizers_cpp.h>
 
+extern "C"{
+#include "libavutil/detection_bbox.h"
+}
+
 using tokenizers::Tokenizer;
 
 typedef struct THClipContext {
@@ -43,20 +47,14 @@ int forward_clip(const THModel *th_model, const THRequestItem *request, const c1
 int process_clip_similarity(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 
 // Helper functions
-torch::Tensor get_tokens(const THModel *th_model, const std::string& prompt);
 int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path);
 int encode_image_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 int encode_text_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
-torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image_features, 
-                                             const torch::Tensor& text_embedding,
-                                             const float& logit_scale,
-                                             const DnnContext *ctx,
-                                             float temperature);
 
 // Parameter setting and cleanup
 int set_params_clip(const THModel *th_model, const char **labels, const int& label_count,
                    const char *tokenizer_path);
 void free_clip_context(THClipContext *clip_ctx);
 
-#endif // CONFIG_LIBTOKENIZERS
-#endif // AVFILTER_DNN_TORCH_CLIP_BACKEND_H
+#endif
+#endif
