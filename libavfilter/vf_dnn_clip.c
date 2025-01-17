@@ -28,7 +28,6 @@
 #include "dnn_filter_common.h"
 #include "video.h"
 #include "libavutil/time.h"
-#include "libavutil/avstring.h"
 #include "libavutil/detection_bbox.h"
 
 typedef struct CLIPContext {
@@ -61,9 +60,6 @@ static const AVOption dnn_clip_options[] = {
 
 AVFILTER_DNN_DEFINE_CLASS(dnn_clip, DNN_TH);
 
-/**
- * Free allocated text prompts.
- */
 static void free_classify_labels(CLIPContext *ctx)
 {
     for (int i = 0; i < ctx->label_count; i++)
@@ -72,10 +68,6 @@ static void free_classify_labels(CLIPContext *ctx)
     av_freep(&ctx->labels);
 }
 
-/**
- * Read text prompts from file.
- * Each line contains one prompt for zero-shot classification.
- */
 static int read_classify_label_file(AVFilterContext *context)
 {
     int line_len;
@@ -132,9 +124,6 @@ static int read_classify_label_file(AVFilterContext *context)
     return 0;
 }
 
-/**
- * Initialize the filter.
- */
 static av_cold int dnn_clip_init(AVFilterContext *context)
 {
     CLIPContext *ctx = context->priv;
@@ -152,19 +141,13 @@ static av_cold int dnn_clip_init(AVFilterContext *context)
     return read_classify_label_file(context);
 }
 
-/**
- * Uninitialize the filter.
- */
 static av_cold void dnn_clip_uninit(AVFilterContext *context)
 {
     CLIPContext *ctx = context->priv;
     ff_dnn_uninit(&ctx->dnnctx);
     free_classify_labels(ctx);
 }
-/**
- * Handle flushing of frames in the filter.
- * Ensures any remaining frames are processed when the stream ends.
- */
+
 static int dnn_clip_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
 {
     CLIPContext *ctx = outlink->src->priv;
@@ -193,10 +176,6 @@ static int dnn_clip_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out
     return 0;
 }
 
-/**
- * Filter activation function.
- * Controls the flow of frames through the filter and manages async processing.
- */
 static int dnn_clip_activate(AVFilterContext *filter_ctx)
 {
     AVFilterLink *inlink = filter_ctx->inputs[0];
