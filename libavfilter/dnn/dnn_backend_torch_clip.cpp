@@ -83,7 +83,7 @@ int scale_frame_for_clip(AVFrame *in_frame, AVFrame **scaled_frame, DnnContext *
 
 static torch::Tensor get_tokens(const THModel *th_model, const std::string& prompt) {
     DnnContext *ctx = th_model->ctx;
-    constexpr int expected_length = EMBEDDING_SIZE_CLIP;
+    const int expected_length = EMBEDDING_SIZE_CLIP;
 
     try {
         if (!th_model->clip_ctx || !th_model->clip_ctx->tokenizer) {

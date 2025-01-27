@@ -42,7 +42,7 @@ typedef struct THClipContext {
 
 const std::string START_TOKEN_CLIP = "<|startoftext|>";
 const std::string END_TOKEN_CLIP = "<|endoftext|>";
-constexpr int32_t PADDING_TOKEN_CLIP = 0;
+const int32_t PADDING_TOKEN_CLIP = 0;
 #define EMBEDDING_SIZE_CLIP 77
 
 // Core CLIP functions
