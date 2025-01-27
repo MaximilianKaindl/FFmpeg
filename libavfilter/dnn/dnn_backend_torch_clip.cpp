@@ -381,6 +381,10 @@ static void store_clip_results_to_frame(AVFrame *frame,
             return;
         }
     }
+    else {
+        av_log(log_ctx, AV_LOG_ERROR, "Found Detection Bounding Box from detect filter. CLIP Classification is not compatible with detect yet.\n");
+        return;
+    }
 
     AVDetectionBBoxHeader *header = (AVDetectionBBoxHeader *)sd->data;
     header->nb_bboxes = num_bboxes;
@@ -390,6 +394,7 @@ static void store_clip_results_to_frame(AVFrame *frame,
     for (int i = 0; i < num_bboxes; i++) {
         AVDetectionBBox *bbox = av_get_detection_bbox(header, i);
         // Each bbox covers the whole frame
+        strncpy(bbox->detect_label, "", sizeof(bbox->detect_label));
         bbox->x = 0;
         bbox->y = 0;
         bbox->w = frame->width;
