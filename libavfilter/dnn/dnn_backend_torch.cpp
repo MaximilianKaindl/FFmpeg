@@ -156,6 +156,7 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     DNNData input = { 0 };
     DnnContext *ctx = th_model->ctx;
     int ret, width_idx, height_idx, channel_idx;
+    AVFrame *scaled_frame = NULL;
 
     lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
     if (!lltask) {
@@ -176,10 +177,20 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     input.dims[height_idx] = task->in_frame->height;
     input.dims[width_idx] = task->in_frame->width; 
     #if (CONFIG_LIBTOKENIZERS == 1)
-    //TODO not working atm use-pix_fmt rgb24 -vf scale=224:224
-    if(th_model->is_clip_model){
-        input.dims[height_idx] = 224; 
-        input.dims[width_idx] = 224;
+    if (th_model->is_clip_model) {
+        // Scale the frame to 224x224 RGB24
+        ret = scale_frame_for_clip(task->in_frame, &scaled_frame, ctx);
+        if (ret < 0) {
+            goto err;
+        }
+        // Use scaled frame dimensions
+        input.dims[height_idx] = scaled_frame->height;
+        input.dims[width_idx] = scaled_frame->width;
+    } else {
+    #endif
+        input.dims[height_idx] = task->in_frame->height;
+        input.dims[width_idx] = task->in_frame->width;
+    #if (CONFIG_LIBTOKENIZERS == 1)
     }
     #endif
     input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
@@ -188,10 +199,9 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
         return AVERROR(ENOMEM);
     infer_request->input_tensor = new torch::Tensor();
     infer_request->output = new torch::Tensor();
-    
+
     switch (th_model->model.func_type) {
         case DFT_PROCESS_FRAME:
-        case DFT_ANALYTICS_ZEROSHOTCLASSIFY:
             input.scale = 255;
             if (task->do_ioproc) {
                 if (th_model->model.frame_pre_proc != NULL) {
@@ -201,6 +211,18 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
                 }
             }
             break;
+        #if (CONFIG_LIBTOKENIZERS == 1)
+        case DFT_ANALYTICS_ZEROSHOTCLASSIFY:
+            input.scale = 255;
+            if (task->do_ioproc) {
+                if (th_model->model.frame_pre_proc != NULL) {
+                    th_model->model.frame_pre_proc(scaled_frame, &input, th_model->model.filter_ctx);
+                }
+                else {
+                    ff_proc_from_frame_to_dnn(scaled_frame, &input, ctx);
+                }
+        }
+        #endif
         default:
             avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
             break;

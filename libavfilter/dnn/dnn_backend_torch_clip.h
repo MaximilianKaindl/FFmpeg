@@ -45,6 +45,7 @@ int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx);
 int fill_model_input_clip(const THModel *th_model, const THRequestItem *request, const DNNData& input);
 int forward_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 int process_clip_similarity(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
+int scale_frame_for_clip(AVFrame *in_frame, AVFrame **scaled_frame, DnnContext *ctx);
 
 // Helper functions
 int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path);
