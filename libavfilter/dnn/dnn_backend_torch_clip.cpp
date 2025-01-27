@@ -23,6 +23,62 @@ extern "C" {
 #include "libavutil/mem.h"
 #include "libavutil/avassert.h"
 #include "libavutil/log.h"
+#include "libswscale/swscale.h"
+}
+
+int scale_frame_for_clip(AVFrame *in_frame, AVFrame **scaled_frame, DnnContext *ctx) {
+    int ret = 0;
+    SwsContext *sws_ctx;
+    AVFrame *scaled = NULL;
+
+    // Create new frame
+    scaled = av_frame_alloc();
+    if (!scaled) {
+        av_log(ctx, AV_LOG_ERROR, "Failed to allocate memory for scaled frame\n");
+        return AVERROR(ENOMEM);
+    }
+
+    // Set properties for 224x224 RGB24
+    scaled->width = 224;
+    scaled->height = 224;
+    scaled->format = AV_PIX_FMT_RGB24;
+
+    // Allocate buffer for scaled frame
+    ret = av_frame_get_buffer(scaled, 0);
+    if (ret < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Failed to allocate buffer for scaled frame\n");
+        av_frame_free(&scaled);
+        return ret;
+    }
+
+    // Initialize scaling context
+    sws_ctx = sws_getContext(
+        in_frame->width, in_frame->height, (AVPixelFormat)in_frame->format,
+        224, 224, AV_PIX_FMT_RGB24,
+        SWS_BILINEAR, NULL, NULL, NULL
+    );
+
+    if (!sws_ctx) {
+        av_log(ctx, AV_LOG_ERROR, "Failed to create scaling context\n");
+        av_frame_free(&scaled);
+        return AVERROR(EINVAL);
+    }
+
+    // Perform scaling
+    ret = sws_scale(sws_ctx, (const uint8_t * const*)in_frame->data,
+                    in_frame->linesize, 0, in_frame->height,
+                    scaled->data, scaled->linesize);
+
+    sws_freeContext(sws_ctx);
+
+    if (ret < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Failed to scale frame\n");
+        av_frame_free(&scaled);
+        return ret;
+    }
+
+    *scaled_frame = scaled;
+    return 0;
 }
 
 static torch::Tensor get_tokens(const THModel *th_model, const std::string& prompt) {
