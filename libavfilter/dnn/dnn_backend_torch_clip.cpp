@@ -83,19 +83,18 @@ int scale_frame_for_clip(AVFrame *in_frame, AVFrame **scaled_frame, DnnContext *
 
 static torch::Tensor get_tokens(const THModel *th_model, const std::string& prompt) {
     DnnContext *ctx = th_model->ctx;
-    //TODO : Load Special Tokens from tokenizer
-    const int expected_length = 77;  // CLIP's standard sequence length
-    const int start_token = 49406;   // CLIP's BOS token
-    const int end_token = 49407;     // CLIP's EOS token
-    const int pad_token = 0;         // CLIP's padding token
+    constexpr int expected_length = EMBEDDING_SIZE_CLIP;
 
     try {
         if (!th_model->clip_ctx || !th_model->clip_ctx->tokenizer) {
             throw std::runtime_error("Tokenizer not initialized");
         }
 
+        int32_t start_token = th_model->clip_ctx->tokenizer->TokenToId(START_TOKEN_CLIP);
+        int32_t end_token = th_model->clip_ctx->tokenizer->TokenToId(END_TOKEN_CLIP);
+
         // Create vector with correct size, filled with padding tokens
-        std::vector<int64_t> padded_ids(expected_length, pad_token);
+        std::vector<int64_t> padded_ids(expected_length, PADDING_TOKEN_CLIP);
         
         // Add start token
         padded_ids[0] = start_token;
