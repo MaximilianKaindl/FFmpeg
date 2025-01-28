@@ -60,6 +60,60 @@ static const AVOption dnn_clip_options[] = {
 
 AVFILTER_DNN_DEFINE_CLASS(dnn_clip, DNN_TH);
 
+static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
+{
+    CLIPContext *ctx = filter_ctx->priv;
+    const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
+    int num_labels = ctx->label_count;
+    float *probabilities = (float*)output->data;
+    int num_bboxes = (num_labels + max_classes_per_box - 1) / max_classes_per_box;
+
+    AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
+    if (!sd) {
+        sd = av_frame_new_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES,
+                                   sizeof(AVDetectionBBoxHeader) +
+                                   num_bboxes * sizeof(AVDetectionBBox));
+        if (!sd) {
+            av_log(filter_ctx, AV_LOG_ERROR, "Failed to allocate side data\n");
+            return AVERROR(ENOMEM);
+        }
+    }
+    else {
+        av_log(filter_ctx, AV_LOG_ERROR, "Found Detection Bounding Box from detect filter. CLIP Classification is not compatible with detect yet.\n");
+        return AVERROR(ENOMEM);
+    }
+
+    AVDetectionBBoxHeader *header = (AVDetectionBBoxHeader *)sd->data;
+    header->nb_bboxes = num_bboxes;
+    header->bbox_size = sizeof(AVDetectionBBox);
+    snprintf(header->source, sizeof(header->source), "clip");
+
+    for (int i = 0; i < num_bboxes; i++) {
+        AVDetectionBBox *bbox = av_get_detection_bbox(header, i);
+        strncpy(bbox->detect_label, "", sizeof(bbox->detect_label));
+        bbox->x = 0;
+        bbox->y = 0;
+        bbox->w = frame->width;
+        bbox->h = frame->height;
+        bbox->classify_count = 0;
+
+        const int start_idx = i * max_classes_per_box;
+        const int end_idx = FFMIN(num_labels, (i + 1) * max_classes_per_box);
+
+        for (int j = start_idx; j < end_idx; j++) {
+            // Convert probability to percentage (0-100) and store as AVRational
+            int percentage = (int)(probabilities[j] * 100);
+            bbox->classify_confidences[bbox->classify_count] = av_make_q(percentage, 100);
+
+            snprintf(bbox->classify_labels[bbox->classify_count],
+                    sizeof(bbox->classify_labels[0]),
+                    "%s", ctx->labels[j]);
+            bbox->classify_count++;
+        }
+    }
+    return 0;
+}
+
 static void free_classify_labels(CLIPContext *ctx)
 {
     for (int i = 0; i < ctx->label_count; i++)
@@ -132,6 +186,7 @@ static av_cold int dnn_clip_init(AVFilterContext *context)
     ret = ff_dnn_init(&ctx->dnnctx, DFT_ANALYTICS_ZEROSHOTCLASSIFY, context);
     if (ret < 0)
         return ret;
+    ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_clip_post_proc);
 
     if (!ctx->labels_filename) {
         av_log(context, AV_LOG_ERROR, "Text prompts file is required for CLIP classification\n");

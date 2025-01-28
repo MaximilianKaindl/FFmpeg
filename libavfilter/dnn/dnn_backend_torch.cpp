@@ -306,22 +306,15 @@ static void infer_completion_callback(void *args) {
 
     c10::IntArrayRef sizes = output->sizes();
 
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    if(th_model->is_clip_model){
-        int ret = process_clip_similarity(th_model,request,output->device());
-        if(ret < 0){
-            av_log(th_model->ctx, AV_LOG_ERROR, "Unable to process clip inference.\n");
-            goto err;
-        }
-        task->inference_done++;
-        av_freep(&request->lltask);
-        return;
-    }
-    #endif
-
     outputs.order = DCO_RGB;
     outputs.layout = DL_NCHW;
     outputs.dt = DNN_FLOAT;
+    #if (CONFIG_LIBTOKENIZERS == 1)
+    if (th_model->is_clip_model && sizes.size() == 1) {
+        //Do nothing
+    }
+    else
+    #endif
     if (sizes.size() == 4) {
         // 4 dimensions: [batch_size, channel, height, width]
         // this format of data is normally used for video frame SR
@@ -352,6 +345,25 @@ static void infer_completion_callback(void *args) {
             task->out_frame->height = outputs.dims[dnn_get_height_idx_by_layout(outputs.layout)];
         }
         break;
+    #if (CONFIG_LIBTOKENIZERS == 1)
+    case DFT_ANALYTICS_ZEROSHOTCLASSIFY:
+        if (task->do_ioproc) {
+            // Post process can only deal with CPU memory.
+            if (output->device() != torch::kCPU)
+                *output = output->to(torch::kCPU);
+            outputs.data = output->data_ptr<float>();
+            if (th_model->model.classify_post_proc != NULL) {
+                th_model->model.classify_post_proc(task->in_frame, &outputs, lltask->bbox_index, th_model->model.filter_ctx);
+            }
+            else {
+                ff_proc_from_dnn_to_frame(task->out_frame, &outputs, th_model->ctx);
+            }
+        } else {
+            task->out_frame->width = outputs.dims[dnn_get_width_idx_by_layout(outputs.layout)];
+            task->out_frame->height = outputs.dims[dnn_get_height_idx_by_layout(outputs.layout)];
+        }
+        break;
+    #endif
     default:
         avpriv_report_missing_feature(th_model->ctx, "model function type %d", th_model->model.func_type);
         goto err;

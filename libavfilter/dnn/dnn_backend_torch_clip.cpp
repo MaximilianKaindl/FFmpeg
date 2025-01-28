@@ -138,6 +138,7 @@ int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx) {
         auto encode_text = th_model->jit_model->get_method("encode_text");
         th_model->is_clip_model = true;
         th_model->clip_ctx = (THClipContext *)av_mallocz(sizeof(THClipContext));
+        th_model->clip_ctx->logit_scale = std::exp(std::log(1.0f / 0.07f));
         av_log(th_model->ctx, AV_LOG_INFO, 
                "Successfully initialized CLIP model\n");
         return 0;
@@ -233,7 +234,11 @@ int forward_clip(const THModel *th_model, const THRequestItem *request, const c1
         av_log(th_model->ctx, AV_LOG_ERROR, "Text encoding failed in CLIP preprocessing\n");
         return ret;
     }
-    th_model->clip_ctx->logit_scale = std::exp(std::log(1.0f / 0.07f));
+    ret = process_clip_similarity(th_model, request, device);
+    if (ret < 0) {
+        av_log(th_model->ctx, AV_LOG_ERROR, "Error in CLIP Similarity calculation\n");
+        return ret;
+    }
     return 0;
 }
 
@@ -257,109 +262,6 @@ int fill_model_input_clip(const THModel *th_model, const THRequestItem *request,
     return 0;
 }
 
-static std::vector<std::pair<float, std::string>> softmax_and_map_to_labels(const std::vector<float>& scores, const std::vector<std::string>& labels) {
-    const torch::Tensor scores_tensor = torch::tensor(scores);
-    const torch::Tensor softmax_scores = torch::softmax(scores_tensor, 0);
-    
-    std::vector<std::pair<float, std::string>> scored_labels;
-    scored_labels.reserve(scores.size());
-    
-    // Access softmax scores
-    auto scores_accessor = softmax_scores.accessor<float,1>();
-    
-    for (size_t i = 0; i < scores.size(); i++) {
-        scored_labels.emplace_back(
-            scores_accessor[i] * 100.0f,  // Convert to percentage
-            labels[i]
-        );
-    }
-    
-    std::sort(scored_labels.begin(), scored_labels.end(),
-              std::greater<std::pair<float, std::string>>());
-    
-    return scored_labels;
-}
-
-
-static void print_clip_similarity_scores(const THModel *th_model, const std::vector<std::pair<float, std::string>>& scored_labels) {
-    DnnContext *ctx = th_model->ctx;
-    try {
-        av_log(ctx, AV_LOG_INFO, "\nCLIP Analysis Results:\n");
-        for (auto& scored_label : scored_labels) {
-            const float high_confidence_threshold = 50.0f;
-            if (scored_label.first >= high_confidence_threshold) {
-                av_log(ctx, AV_LOG_INFO, "✓ ");
-            } else {
-                av_log(ctx, AV_LOG_INFO, "  ");
-            }
-            
-            av_log(ctx, AV_LOG_INFO, "%.1f%% : \"%s\"\n",
-                   scored_label.first,
-                   scored_label.second.c_str());
-        }
-        
-        if (!scored_labels.empty()) {
-            av_log(ctx, AV_LOG_INFO, "\nBest match: \"%s\" with %.1f%% confidence\n",
-                   scored_labels[0].second.c_str(),
-                   scored_labels[0].first);
-        }
-        
-    } catch (const c10::Error& e) {
-        av_log(ctx, AV_LOG_ERROR, "Error processing similarity scores: %s\n", e.what());
-    }
-}
-static void store_clip_results_to_frame(AVFrame *frame,
-                                      const std::vector<std::pair<float, std::string>>& scored_labels,
-                                      void *log_ctx) {
-    constexpr int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
-    const int num_of_labels = scored_labels.size();
-    int num_bboxes = (num_of_labels + max_classes_per_box - 1) / max_classes_per_box;
-
-    // Create or get side data with enough space for all bboxes
-    AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-    if (!sd) {
-        sd = av_frame_new_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES,
-                                   sizeof(AVDetectionBBoxHeader) +
-                                   num_bboxes * sizeof(AVDetectionBBox));
-        if (!sd) {
-            av_log(log_ctx, AV_LOG_ERROR, "Failed to allocate side data\n");
-            return;
-        }
-    }
-    else {
-        av_log(log_ctx, AV_LOG_ERROR, "Found Detection Bounding Box from detect filter. CLIP Classification is not compatible with detect yet.\n");
-        return;
-    }
-
-    AVDetectionBBoxHeader *header = (AVDetectionBBoxHeader *)sd->data;
-    header->nb_bboxes = num_bboxes;
-    header->bbox_size = sizeof(AVDetectionBBox);
-    snprintf(header->source, sizeof(header->source), "clip");
-
-    for (int i = 0; i < num_bboxes; i++) {
-        AVDetectionBBox *bbox = av_get_detection_bbox(header, i);
-        // Each bbox covers the whole frame
-        strncpy(bbox->detect_label, "", sizeof(bbox->detect_label));
-        bbox->x = 0;
-        bbox->y = 0;
-        bbox->w = frame->width;
-        bbox->h = frame->height;
-        bbox->classify_count = 0;
-
-        // Fill this bbox with up to max_classes_per_box classifications
-        const int start_idx = i * max_classes_per_box;
-        const int end_idx = std::min(num_of_labels, (i + 1) * max_classes_per_box);
-
-        for (int j = start_idx; j < end_idx; j++) {
-            bbox->classify_confidences[bbox->classify_count] =
-                av_make_q(static_cast<int>(scored_labels[j].first * 100), 100);
-            snprintf(bbox->classify_labels[bbox->classify_count],
-                    sizeof(bbox->classify_labels[0]),
-                    "%s", scored_labels[j].second.c_str());
-            bbox->classify_count++;
-        }
-    }
-}
 int set_params_clip(const THModel *th_model, const char **labels, const int& label_count, const char *tokenizer_path) {
     if (!th_model || !labels || label_count <= 0) {
         return AVERROR(EINVAL);
@@ -388,15 +290,12 @@ static torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image
     }
 }
 
-int process_clip_similarity(const THModel *th_model, const THRequestItem *request,const c10::Device& device) {
+int process_clip_similarity(const THModel *th_model, const THRequestItem *request, const c10::Device& device) {
     DnnContext *ctx = th_model->ctx;
     THInferRequest *infer_request = request->infer_request;
     LastLevelTaskItem *lltask = request->lltask;
-    TaskItem *task = lltask->task;
-    AVFrame *frame = task->in_frame;
     auto image_features = infer_request->input_tensor;
     auto text_embeddings = infer_request->text_embeddings;
-
     std::vector<float> similarity_scores;
     similarity_scores.reserve(text_embeddings->size());
 
@@ -406,16 +305,23 @@ int process_clip_similarity(const THModel *th_model, const THRequestItem *reques
         for (size_t i = 0; i < text_embeddings->size(); i++) {
             auto device_text_embedding = (*infer_request->text_embeddings)[i].to(device);
             auto similarity = calculate_clip_similarity_matrix(device_image, device_text_embedding, th_model->clip_ctx->logit_scale, ctx);
-            float similarity_value = similarity.item<float>();
+            auto similarity_value = similarity.item<float>();
             similarity_scores.push_back(similarity_value);
 
-            av_log(ctx, AV_LOG_DEBUG, "Label %s: logit_value=%.4f\n", 
+            av_log(ctx, AV_LOG_DEBUG, "Label %s: logit_value=%.4f\n",
                    th_model->clip_ctx->labels[i].c_str(), similarity_value);
         }
 
-        auto scored_labels = softmax_and_map_to_labels(similarity_scores, th_model->clip_ctx->labels);
-        store_clip_results_to_frame(frame,scored_labels,ctx);
-        //print_clip_similarity_scores(th_model, scored_labels);
+        // Convert scores to tensor and compute softmax
+        auto scores_tensor = torch::tensor(similarity_scores);
+        auto softmax_scores = torch::softmax(scores_tensor, 0);
+
+        infer_request->output = new torch::Tensor(softmax_scores);
+
+        if (!infer_request->output->defined()) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to create output tensor\n");
+            return AVERROR(EINVAL);
+        }
         return 0;
 
     } catch (const c10::Error& e) {
