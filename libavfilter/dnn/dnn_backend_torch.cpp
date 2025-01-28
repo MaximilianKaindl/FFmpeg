@@ -174,18 +174,10 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     width_idx = dnn_get_width_idx_by_layout(input.layout);
     height_idx = dnn_get_height_idx_by_layout(input.layout);
     channel_idx = dnn_get_channel_idx_by_layout(input.layout);
-    input.dims[height_idx] = task->in_frame->height;
-    input.dims[width_idx] = task->in_frame->width; 
     #if (CONFIG_LIBTOKENIZERS == 1)
     if (th_model->is_clip_model) {
-        // Scale the frame to 224x224 RGB24
-        ret = scale_frame_for_clip(task->in_frame, &scaled_frame, ctx);
-        if (ret < 0) {
-            goto err;
-        }
-        // Use scaled frame dimensions
-        input.dims[height_idx] = scaled_frame->height;
-        input.dims[width_idx] = scaled_frame->width;
+        input.dims[height_idx] = 224;
+        input.dims[width_idx] = 224;
     } else {
     #endif
         input.dims[height_idx] = task->in_frame->height;
@@ -193,6 +185,7 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     #if (CONFIG_LIBTOKENIZERS == 1)
     }
     #endif
+
     input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
                             input.dims[channel_idx] * sizeof(float));
     if (!input.data)
@@ -213,15 +206,16 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
             break;
         #if (CONFIG_LIBTOKENIZERS == 1)
         case DFT_ANALYTICS_ZEROSHOTCLASSIFY:
-            input.scale = 255;
+            input.scale = 1;
             if (task->do_ioproc) {
                 if (th_model->model.frame_pre_proc != NULL) {
                     th_model->model.frame_pre_proc(scaled_frame, &input, th_model->model.filter_ctx);
                 }
                 else {
-                    ff_proc_from_frame_to_dnn(scaled_frame, &input, ctx);
+                    ff_frame_to_dnn_clip(task->in_frame, &input, ctx);
                 }
-        }
+            }
+            break;
         #endif
         default:
             avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
@@ -319,8 +313,6 @@ static void infer_completion_callback(void *args) {
             av_log(th_model->ctx, AV_LOG_ERROR, "Unable to process clip inference.\n");
             goto err;
         }
-        //Clip does not change the input
-        task->out_frame = av_frame_clone(task->in_frame);
         task->inference_done++;
         av_freep(&request->lltask);
         return;
