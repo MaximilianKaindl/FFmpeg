@@ -116,6 +116,10 @@ static int load_bytes_from_file(const std::string& path, std::string& data, DnnC
 }
 
 int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path) {
+    //Dont create tokenizer if it already exists
+    if (th_model->clip_ctx->tokenizer) {
+        return 0;
+    }
     std::string blob;
     int ret = load_bytes_from_file(tokenizer_path, blob, th_model->ctx);
     if (ret < 0) {
