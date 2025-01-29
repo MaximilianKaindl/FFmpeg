@@ -29,6 +29,7 @@
 #include "video.h"
 #include "libavutil/time.h"
 #include "libavutil/detection_bbox.h"
+#include "libavutil/avstring.h"
 
 typedef struct DNNCLIPContext {
     const AVClass *clazz;
@@ -66,51 +67,77 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
     const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
     int num_labels = ctx->label_count;
     float *probabilities = (float*)output->data;
+
+    // Calculate number of bounding boxes needed
     int num_bboxes = (num_labels + max_classes_per_box - 1) / max_classes_per_box;
 
+    // Calculate total size needed
+    size_t side_data_size = sizeof(AVDetectionBBoxHeader) +
+                           (num_bboxes * sizeof(AVDetectionBBox));
+
     AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-    if (!sd) {
-        sd = av_frame_new_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES,
-                                   sizeof(AVDetectionBBoxHeader) +
-                                   num_bboxes * sizeof(AVDetectionBBox));
-        if (!sd) {
-            av_log(filter_ctx, AV_LOG_ERROR, "Failed to allocate side data\n");
-            return AVERROR(ENOMEM);
-        }
+    if (sd) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Found Detection Box of Detect Filter. Detect is not compatible with CLIP Filter yet. Detection Boxes get replaced ... %zu\n", side_data_size);
+        av_frame_remove_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
     }
-    else {
-        av_log(filter_ctx, AV_LOG_ERROR, "Found Detection Bounding Box from detect filter. CLIP Classification is not compatible with detect yet.\n");
+
+    sd = av_frame_new_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES, side_data_size);
+    if (!sd) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to allocate side data of size %zu\n", side_data_size);
         return AVERROR(ENOMEM);
     }
+
+    // Zero initialize the entire side data
+    memset(sd->data, 0, side_data_size);
 
     AVDetectionBBoxHeader *header = (AVDetectionBBoxHeader *)sd->data;
     header->nb_bboxes = num_bboxes;
     header->bbox_size = sizeof(AVDetectionBBox);
-    snprintf(header->source, sizeof(header->source), "clip");
+    av_strlcpy(header->source, "clip", sizeof(header->source));
 
+    // Validate bbox array access before loop
+    if ((size_t)sd->size < sizeof(AVDetectionBBoxHeader) + num_bboxes * sizeof(AVDetectionBBox)) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Side data size mismatch\n");
+        return AVERROR(EINVAL);
+    }
+
+    // Process each bbox
     for (int i = 0; i < num_bboxes; i++) {
         AVDetectionBBox *bbox = av_get_detection_bbox(header, i);
-        strncpy(bbox->detect_label, "", sizeof(bbox->detect_label));
+        if (!bbox) {
+            av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", i);
+            return AVERROR(EINVAL);
+        }
+
+        // Initialize bbox
         bbox->x = 0;
         bbox->y = 0;
         bbox->w = frame->width;
         bbox->h = frame->height;
         bbox->classify_count = 0;
+        bbox->detect_label[0] = '\0';
 
+        // Calculate range of labels for this bbox
         const int start_idx = i * max_classes_per_box;
         const int end_idx = FFMIN(num_labels, (i + 1) * max_classes_per_box);
 
-        for (int j = start_idx; j < end_idx; j++) {
-            // Convert probability to percentage (0-100) and store as AVRational
+        // Add classifications for this bbox
+        for (int j = start_idx; j < end_idx && bbox->classify_count < max_classes_per_box; j++) {
+            if (!ctx->labels[j]) {
+                av_log(filter_ctx, AV_LOG_ERROR, "Invalid label at index %d\n", j);
+                continue;
+            }
+
             int percentage = (int)(probabilities[j] * 100);
             bbox->classify_confidences[bbox->classify_count] = av_make_q(percentage, 100);
+            av_strlcpy(bbox->classify_labels[bbox->classify_count],
+                      ctx->labels[j],
+                      sizeof(bbox->classify_labels[0]));
 
-            snprintf(bbox->classify_labels[bbox->classify_count],
-                    sizeof(bbox->classify_labels[0]),
-                    "%s", ctx->labels[j]);
             bbox->classify_count++;
         }
     }
+
     return 0;
 }
 
