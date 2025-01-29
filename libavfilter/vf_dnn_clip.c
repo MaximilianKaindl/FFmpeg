@@ -30,17 +30,17 @@
 #include "libavutil/time.h"
 #include "libavutil/detection_bbox.h"
 
-typedef struct CLIPContext {
+typedef struct DNNCLIPContext {
     const AVClass *clazz;
     DnnContext dnnctx;
     char *labels_filename;      
     char *tokenizer_path;       
     char **labels;
     int label_count;
-} CLIPContext;
+} DNNCLIPContext;
 
-#define OFFSET(x) offsetof(CLIPContext, dnnctx.x)
-#define OFFSET2(x) offsetof(CLIPContext, x)
+#define OFFSET(x) offsetof(DNNCLIPContext, dnnctx.x)
+#define OFFSET2(x) offsetof(DNNCLIPContext, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM
 
 static const AVOption dnn_clip_options[] = {
@@ -62,7 +62,7 @@ AVFILTER_DNN_DEFINE_CLASS(dnn_clip, DNN_TH);
 
 static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
-    CLIPContext *ctx = filter_ctx->priv;
+    DNNCLIPContext *ctx = filter_ctx->priv;
     const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
     int num_labels = ctx->label_count;
     float *probabilities = (float*)output->data;
@@ -114,7 +114,7 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
     return 0;
 }
 
-static void free_classify_labels(CLIPContext *ctx)
+static void free_classify_labels(DNNCLIPContext *ctx)
 {
     for (int i = 0; i < ctx->label_count; i++)
         av_freep(&ctx->labels[i]);
@@ -126,7 +126,7 @@ static int read_classify_label_file(AVFilterContext *context)
 {
     int line_len;
     FILE *file;
-    CLIPContext *ctx = context->priv;
+    DNNCLIPContext *ctx = context->priv;
 
     file = avpriv_fopen_utf8(ctx->labels_filename, "r");
     if (!file) {
@@ -180,7 +180,7 @@ static int read_classify_label_file(AVFilterContext *context)
 
 static av_cold int dnn_clip_init(AVFilterContext *context)
 {
-    CLIPContext *ctx = context->priv;
+    DNNCLIPContext *ctx = context->priv;
     int ret;
 
     ret = ff_dnn_init(&ctx->dnnctx, DFT_ANALYTICS_ZEROSHOTCLASSIFY, context);
@@ -198,14 +198,14 @@ static av_cold int dnn_clip_init(AVFilterContext *context)
 
 static av_cold void dnn_clip_uninit(AVFilterContext *context)
 {
-    CLIPContext *ctx = context->priv;
+    DNNCLIPContext *ctx = context->priv;
     ff_dnn_uninit(&ctx->dnnctx);
     free_classify_labels(ctx);
 }
 
 static int dnn_clip_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
 {
-    CLIPContext *ctx = outlink->src->priv;
+    DNNCLIPContext *ctx = outlink->src->priv;
     int ret;
     DNNAsyncStatusType async_state;
 
@@ -235,7 +235,7 @@ static int dnn_clip_activate(AVFilterContext *filter_ctx)
 {
     AVFilterLink *inlink = filter_ctx->inputs[0];
     AVFilterLink *outlink = filter_ctx->outputs[0];
-    CLIPContext *ctx = filter_ctx->priv;
+    DNNCLIPContext *ctx = filter_ctx->priv;
     AVFrame *in = NULL;
     int64_t pts;
     int ret, status;
@@ -300,7 +300,7 @@ const AVFilter ff_vf_dnn_clip = {
     .name          = "dnn_clip",
     .description   = NULL_IF_CONFIG_SMALL("Apply CLIP zero-shot classification."),
     .preinit       = ff_dnn_filter_init_child_class,
-    .priv_size     = sizeof(CLIPContext),
+    .priv_size     = sizeof(DNNCLIPContext),
     .init          = dnn_clip_init,
     .uninit        = dnn_clip_uninit,
     .activate      = dnn_clip_activate,  
