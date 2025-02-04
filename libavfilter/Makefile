@@ -289,6 +289,7 @@ OBJS-$(CONFIG_DISPLACE_FILTER)               += vf_displace.o framesync.o
 OBJS-$(CONFIG_DNN_CLASSIFY_FILTER)           += vf_dnn_classify.o
 OBJS-$(CONFIG_DNN_DETECT_FILTER)             += vf_dnn_detect.o
 OBJS-$(CONFIG_DNN_PROCESSING_FILTER)         += vf_dnn_processing.o
+OBJS-$(CONFIG_DNN_CLIP_FILTER)               += vf_dnn_clip.o
 OBJS-$(CONFIG_DOUBLEWEAVE_FILTER)            += vf_weave.o
 OBJS-$(CONFIG_DRAWBOX_FILTER)                += vf_drawbox.o
 OBJS-$(CONFIG_DRAWGRAPH_FILTER)              += f_drawgraph.o

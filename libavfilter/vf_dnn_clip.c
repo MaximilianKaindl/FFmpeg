@@ -67,15 +67,23 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
     const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
     int num_labels = ctx->label_count;
     float *probabilities = (float*)output->data;
+    int num_bboxes;
+    size_t side_data_size;
+    AVFrameSideData *sd;
+    AVDetectionBBoxHeader *header;
+    AVDetectionBBox *bbox;
+    int i, j;
+    int start_idx, end_idx;
+    int percentage;
 
-    // Calculate number of bounding boxes needed
-    int num_bboxes = (num_labels + max_classes_per_box - 1) / max_classes_per_box;
+    // Calculate number of bounding boxes needed 
+    num_bboxes = (num_labels + max_classes_per_box - 1) / max_classes_per_box;
 
-    // Calculate total size needed
-    size_t side_data_size = sizeof(AVDetectionBBoxHeader) +
-                           (num_bboxes * sizeof(AVDetectionBBox));
+    // Calculate total size needed 
+    side_data_size = sizeof(AVDetectionBBoxHeader) +
+                    (num_bboxes * sizeof(AVDetectionBBox));
 
-    AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
     if (sd) {
         av_log(filter_ctx, AV_LOG_ERROR, "Found Detection Box of Detect Filter. Detect is not compatible with CLIP Filter yet. Detection Boxes get replaced ... %zu\n", side_data_size);
         av_frame_remove_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
@@ -87,29 +95,23 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
         return AVERROR(ENOMEM);
     }
 
-    // Zero initialize the entire side data
+    // Zero initialize the entire side data 
     memset(sd->data, 0, side_data_size);
 
-    AVDetectionBBoxHeader *header = (AVDetectionBBoxHeader *)sd->data;
+    header = (AVDetectionBBoxHeader *)sd->data;
     header->nb_bboxes = num_bboxes;
     header->bbox_size = sizeof(AVDetectionBBox);
     av_strlcpy(header->source, "clip", sizeof(header->source));
 
-    // Validate bbox array access before loop
-    if ((size_t)sd->size < sizeof(AVDetectionBBoxHeader) + num_bboxes * sizeof(AVDetectionBBox)) {
-        av_log(filter_ctx, AV_LOG_ERROR, "Side data size mismatch\n");
-        return AVERROR(EINVAL);
-    }
-
-    // Process each bbox
-    for (int i = 0; i < num_bboxes; i++) {
-        AVDetectionBBox *bbox = av_get_detection_bbox(header, i);
+    //Process each bbox 
+    for (i = 0; i < num_bboxes; i++) {
+        bbox = av_get_detection_bbox(header, i);
         if (!bbox) {
             av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", i);
             return AVERROR(EINVAL);
         }
 
-        // Initialize bbox
+        // Initialize bbox 
         bbox->x = 0;
         bbox->y = 0;
         bbox->w = frame->width;
@@ -117,18 +119,17 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
         bbox->classify_count = 0;
         bbox->detect_label[0] = '\0';
 
-        // Calculate range of labels for this bbox
-        const int start_idx = i * max_classes_per_box;
-        const int end_idx = FFMIN(num_labels, (i + 1) * max_classes_per_box);
+        start_idx = i * max_classes_per_box;
+        end_idx = FFMIN(num_labels, (i + 1) * max_classes_per_box);
 
-        // Add classifications for this bbox
-        for (int j = start_idx; j < end_idx && bbox->classify_count < max_classes_per_box; j++) {
+        // Set classifications for this bbox
+        for (j = start_idx; j < end_idx && bbox->classify_count < max_classes_per_box; j++) {
             if (!ctx->labels[j]) {
                 av_log(filter_ctx, AV_LOG_ERROR, "Invalid label at index %d\n", j);
                 continue;
             }
 
-            int percentage = (int)(probabilities[j] * 100);
+            percentage = (int)(probabilities[j] * 100);
             bbox->classify_confidences[bbox->classify_count] = av_make_q(percentage, 100);
             av_strlcpy(bbox->classify_labels[bbox->classify_count],
                       ctx->labels[j],
@@ -210,7 +211,7 @@ static av_cold int dnn_clip_init(AVFilterContext *context)
     DNNCLIPContext *ctx = context->priv;
     int ret;
 
-    ret = ff_dnn_init(&ctx->dnnctx, DFT_ANALYTICS_ZEROSHOTCLASSIFY, context);
+    ret = ff_dnn_init(&ctx->dnnctx, DFT_ANALYTICS_CLIP, context);
     if (ret < 0)
         return ret;
     ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_clip_post_proc);
@@ -219,7 +220,10 @@ static av_cold int dnn_clip_init(AVFilterContext *context)
         av_log(context, AV_LOG_ERROR, "Text prompts file is required for CLIP classification\n");
         return AVERROR(EINVAL);
     }
-
+    if (!ctx->tokenizer_path) {
+        av_log(context, AV_LOG_ERROR, "Tokenizer file is required for CLIP classification\n");
+        return AVERROR(EINVAL);
+    }
     return read_classify_label_file(context);
 }
 
@@ -323,9 +327,10 @@ static const enum AVPixelFormat pix_fmts[] = {
     AV_PIX_FMT_NONE
 };
 
-const AVFilter ff_vf_dnn_clip = {
-    .name          = "dnn_clip",
-    .description   = NULL_IF_CONFIG_SMALL("Apply CLIP zero-shot classification."),
+const FFFilter ff_vf_dnn_clip = {
+    .p.name          = "dnn_clip",
+    .p.description   = NULL_IF_CONFIG_SMALL("Apply CLIP zero-shot classification."),
+    .p.priv_class    = &dnn_clip_class,
     .preinit       = ff_dnn_filter_init_child_class,
     .priv_size     = sizeof(DNNCLIPContext),
     .init          = dnn_clip_init,
@@ -334,5 +339,4 @@ const AVFilter ff_vf_dnn_clip = {
     FILTER_INPUTS(ff_video_default_filterpad),
     FILTER_OUTPUTS(ff_video_default_filterpad),
     FILTER_PIXFMTS_ARRAY(pix_fmts),
-    .priv_class    = &dnn_clip_class,
 };

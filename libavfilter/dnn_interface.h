@@ -58,7 +58,7 @@ typedef enum {
     DFT_PROCESS_FRAME,      // process the whole frame
     DFT_ANALYTICS_DETECT,   // detect from the whole frame
     DFT_ANALYTICS_CLASSIFY, // classify for each bounding box
-    DFT_ANALYTICS_ZEROSHOTCLASSIFY, // classify frame with zero-shot model
+    DFT_ANALYTICS_CLIP      // classify whole frame with zero-shot classification
 }DNNFunctionType;
 
 typedef enum {

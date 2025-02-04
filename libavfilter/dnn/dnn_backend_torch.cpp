@@ -68,14 +68,12 @@ static void th_free_request(THInferRequest *request)
         delete(request->input_tensor);
         request->input_tensor = NULL;
     }
-
     #if (CONFIG_LIBTOKENIZERS == 1)
     if (request->text_embeddings) {
         delete(request->text_embeddings);
         request->text_embeddings = NULL;    
     }
     #endif
-
     return;
 }
 
@@ -120,13 +118,11 @@ static void dnn_free_model_th(DNNModel **model)
     }
     ff_queue_destroy(th_model->task_queue);
     delete th_model->jit_model;
-
     #if (CONFIG_LIBTOKENIZERS == 1)
     if (th_model->is_clip_model) {
         free_clip_context(th_model->clip_ctx);
     }
     #endif
-
     av_freep(&th_model);
     *model = NULL;
 }
@@ -156,7 +152,6 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     DNNData input = { 0 };
     DnnContext *ctx = th_model->ctx;
     int ret, width_idx, height_idx, channel_idx;
-    AVFrame *scaled_frame = NULL;
 
     lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
     if (!lltask) {
@@ -185,57 +180,47 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     #if (CONFIG_LIBTOKENIZERS == 1)
     }
     #endif
-
     input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
-                            input.dims[channel_idx] * sizeof(float));
+                           input.dims[channel_idx] * sizeof(float));
     if (!input.data)
         return AVERROR(ENOMEM);
     infer_request->input_tensor = new torch::Tensor();
     infer_request->output = new torch::Tensor();
 
     switch (th_model->model.func_type) {
-        case DFT_PROCESS_FRAME:
-            input.scale = 255;
-            if (task->do_ioproc) {
-                if (th_model->model.frame_pre_proc != NULL) {
-                    th_model->model.frame_pre_proc(task->in_frame, &input, th_model->model.filter_ctx);
-                } else {
-                    ff_proc_from_frame_to_dnn(task->in_frame, &input, ctx);
-                }
+    case DFT_PROCESS_FRAME:
+        input.scale = 255;
+        if (task->do_ioproc) {
+            if (th_model->model.frame_pre_proc != NULL) {
+                th_model->model.frame_pre_proc(task->in_frame, &input, th_model->model.filter_ctx);
+            } else {
+                ff_proc_from_frame_to_dnn(task->in_frame, &input, ctx);
             }
-            break;
-        #if (CONFIG_LIBTOKENIZERS == 1)
-        case DFT_ANALYTICS_ZEROSHOTCLASSIFY:
-            input.scale = 1;
-            if (task->do_ioproc) {
-                if (th_model->model.frame_pre_proc != NULL) {
-                    th_model->model.frame_pre_proc(scaled_frame, &input, th_model->model.filter_ctx);
-                }
-                else {
-                    ff_frame_to_dnn_clip(task->in_frame, &input, ctx);
-                }
-            }
-            break;
-        #endif
-        default:
-            avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
-            break;
+        }
+        break;
+    #if (CONFIG_LIBTOKENIZERS == 1)
+    case DFT_ANALYTICS_CLIP:
+        if (task->do_ioproc) {
+            ff_frame_to_dnn_clip(task->in_frame, &input, ctx);              
+        }
+        break;
+    #endif
+    default:
+        avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
+        break;
     }
     *infer_request->input_tensor = torch::from_blob(input.data,
-    {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
-    deleter, torch::kFloat32);
-
+        {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
+        deleter, torch::kFloat32);
     #if (CONFIG_LIBTOKENIZERS == 1)
     if(th_model->is_clip_model){
-        fill_model_input_clip(th_model, request, input);
+        ret = fill_model_input_clip(th_model, request, input);
         if (ret < 0) {
-            av_log(ctx, AV_LOG_ERROR, "CLIP preprocessing failed\n");
             goto err;
         }
         return 0;
     }
     #endif
-    
     return 0;
 
 err:
@@ -243,7 +228,7 @@ err:
     return ret;
 }
 
-static int th_start_inference(void *args) 
+static int th_start_inference(void *args)
 {
     THRequestItem *request = (THRequestItem *)args;
     THInferRequest *infer_request = NULL;
@@ -251,6 +236,7 @@ static int th_start_inference(void *args)
     TaskItem *task = NULL;
     THModel *th_model = NULL;
     DnnContext *ctx = NULL;
+    std::vector<torch::jit::IValue> inputs;
     torch::NoGradGuard no_grad;
 
     if (!request) {
@@ -274,7 +260,6 @@ static int th_start_inference(void *args)
     }
     // Transfer tensor to the same device as model
     c10::Device device = (*th_model->jit_model->parameters().begin()).device();
-
     #if (CONFIG_LIBTOKENIZERS == 1)
     if (th_model->is_clip_model) {
         int ret = forward_clip(th_model,request,device);
@@ -284,14 +269,12 @@ static int th_start_inference(void *args)
         return 0;
     }
     #endif
-
-    std::vector<torch::jit::IValue> inputs;
-    if (infer_request->input_tensor->device() != device) 
+    if (infer_request->input_tensor->device() != device)
         *infer_request->input_tensor = infer_request->input_tensor->to(device);
     inputs.push_back(*infer_request->input_tensor);
 
     *infer_request->output = th_model->jit_model->forward(inputs).toTensor();
-    
+
     return 0;
 }
 
@@ -305,13 +288,12 @@ static void infer_completion_callback(void *args) {
     torch::Tensor *output = infer_request->output;
 
     c10::IntArrayRef sizes = output->sizes();
-
     outputs.order = DCO_RGB;
     outputs.layout = DL_NCHW;
     outputs.dt = DNN_FLOAT;
     #if (CONFIG_LIBTOKENIZERS == 1)
     if (th_model->is_clip_model && sizes.size() == 1) {
-        //Do nothing
+        //Do nothing Clip output has only one dimension which are the similarity scores
     }
     else
     #endif
@@ -346,18 +328,17 @@ static void infer_completion_callback(void *args) {
         }
         break;
     #if (CONFIG_LIBTOKENIZERS == 1)
-    case DFT_ANALYTICS_ZEROSHOTCLASSIFY:
+    case DFT_ANALYTICS_CLIP:
         if (task->do_ioproc) {
             // Post process can only deal with CPU memory.
             if (output->device() != torch::kCPU)
                 *output = output->to(torch::kCPU);
             outputs.data = output->data_ptr<float>();
-            if (th_model->model.classify_post_proc != NULL) {
-                th_model->model.classify_post_proc(task->in_frame, &outputs, lltask->bbox_index, th_model->model.filter_ctx);
+            if (!th_model->model.classify_post_proc) {
+                av_log(th_model->ctx, AV_LOG_ERROR, "clip filter needs to provide post proc\n");
+                goto err;
             }
-            else {
-                ff_proc_from_dnn_to_frame(task->out_frame, &outputs, th_model->ctx);
-            }
+            th_model->model.classify_post_proc(task->in_frame, &outputs, lltask->bbox_index, th_model->model.filter_ctx);           
         } else {
             task->out_frame->width = outputs.dims[dnn_get_width_idx_by_layout(outputs.layout)];
             task->out_frame->height = outputs.dims[dnn_get_height_idx_by_layout(outputs.layout)];
@@ -399,7 +380,7 @@ static int execute_model_th(THRequestItem *request, Queue *lltask_queue)
     }
     task = lltask->task;
     th_model = (THModel *)task->model;
-    
+
     ret = fill_model_input_th(th_model, request);
     if ( ret != 0) {
         goto err;
@@ -474,11 +455,9 @@ static THInferRequest *th_create_inference_request(void)
     }
     request->input_tensor = NULL;
     request->output = NULL;
-
     #if (CONFIG_LIBTOKENIZERS == 1)
     request->text_embeddings = NULL;
     #endif
-
     return request;
 }
 
@@ -494,7 +473,7 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         return NULL;
     model = &th_model->model;
     th_model->ctx = ctx;
-    
+
     c10::Device device = c10::Device(device_name);
     if (device.is_xpu()) {
         if (!at::hasXPU()) {
@@ -511,15 +490,13 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         th_model->jit_model = new torch::jit::Module;
         (*th_model->jit_model) = torch::jit::load(ctx->model_filename);
         th_model->jit_model->to(device);
-
         #if (CONFIG_LIBTOKENIZERS == 1)
+        th_model->is_clip_model = false;
         // Check if this is a CLIP model and initialize accordingly
-        if (func_type != DFT_ANALYTICS_ZEROSHOTCLASSIFY || init_clip_model(th_model,filter_ctx) < 0) {
-            // Not a CLIP model or initialization failed
-            th_model->is_clip_model = false;
+        if (func_type == DFT_ANALYTICS_CLIP && init_clip_model(th_model,filter_ctx) > 0) {
+            goto fail;
         }
         #endif
-
     } catch (const c10::Error& e) {
         av_log(ctx, AV_LOG_ERROR, "Failed to load torch model\n");
         goto fail;
@@ -621,11 +598,10 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
     }
 
     #if (CONFIG_LIBTOKENIZERS == 1)
-    if(model->func_type == DFT_ANALYTICS_ZEROSHOTCLASSIFY) {
+    if(model->func_type == DFT_ANALYTICS_CLIP) {
         DNNExecZeroShotClassificationParams *params = (DNNExecZeroShotClassificationParams *) exec_params;
         ret = set_params_clip(th_model, params->labels, params->label_count, params->tokenizer_path);
         if (ret < 0) {
-            av_log(ctx, AV_LOG_ERROR, "label file invalid.\n");
             return ret;
         }
     }

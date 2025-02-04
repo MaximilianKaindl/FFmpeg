@@ -15,8 +15,8 @@
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
-#ifndef AVFILTER_DNN_BACKEND_TORCH_CLIP_BACKEND_H
-#define AVFILTER_DNN_BACKEND_TORCH_CLIP_BACKEND_H
+#ifndef AVFILTER_DNN_DNN_BACKEND_TORCH_CLIP_H
+#define AVFILTER_DNN_DNN_BACKEND_TORCH_CLIP_H
 
 #include "dnn_backend_torch_common.h"
 
@@ -26,10 +26,6 @@
 #include <vector>
 #include <torch/script.h>
 #include <tokenizers_cpp.h>
-
-extern "C"{
-#include "libavutil/detection_bbox.h"
-}
 
 using tokenizers::Tokenizer;
 
@@ -45,18 +41,15 @@ const std::string END_TOKEN_CLIP = "<|endoftext|>";
 const int32_t PADDING_TOKEN_CLIP = 0;
 #define EMBEDDING_SIZE_CLIP 77
 
-// Core CLIP functions
 int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx);
 int fill_model_input_clip(const THModel *th_model, const THRequestItem *request, const DNNData& input);
 int forward_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 int process_clip_similarity(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 
-// Helper functions
 int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path);
 int encode_image_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 int encode_text_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 
-// Parameter setting and cleanup
 int set_params_clip(const THModel *th_model, const char **labels, const int& label_count,
                    const char *tokenizer_path);
 void free_clip_context(THClipContext *clip_ctx);

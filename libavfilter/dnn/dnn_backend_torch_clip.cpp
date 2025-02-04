@@ -21,9 +21,9 @@
 
 extern "C" {
 #include "libavutil/mem.h"
-#include "libavutil/avassert.h"
 #include "libavutil/log.h"
 #include "libswscale/swscale.h"
+#include "libavformat/avio.h"
 }
 
 static torch::Tensor get_tokens(const THModel *th_model, const std::string& prompt) {
@@ -40,17 +40,17 @@ static torch::Tensor get_tokens(const THModel *th_model, const std::string& prom
 
         // Create vector with correct size, filled with padding tokens
         std::vector<int64_t> padded_ids(expected_length, PADDING_TOKEN_CLIP);
-        
+
         // Add start token
         padded_ids[0] = start_token;
-        
+
         try {
             // Get tokens from the tokenizer
             std::vector<int> tokens = th_model->clip_ctx->tokenizer->Encode(prompt);
 
             // Calculate how many tokens we can copy (leaving space for start and end tokens)
             const size_t max_text_tokens = expected_length - 2;
-            
+
             const size_t num_tokens = tokens.size();
             if(num_tokens > max_text_tokens) {
                 av_log(ctx, AV_LOG_WARNING, "Input text is too long, truncating to %ld tokens\n", max_text_tokens);
@@ -83,36 +83,40 @@ static torch::Tensor get_tokens(const THModel *th_model, const std::string& prom
 }
 
 static int load_bytes_from_file(const std::string& path, std::string& data, DnnContext* log_ctx) {
-    std::ifstream fs(path, std::ios::in | std::ios::binary);
-    if (fs.fail()) {
+    AVIOContext *ctx = NULL;
+    int ret;
+    int64_t size;
+    
+    ret = avio_open(&ctx, path.c_str(), AVIO_FLAG_READ);
+    if (ret < 0) {
         av_log(log_ctx, AV_LOG_ERROR, "Cannot open file: %s\n", path.c_str());
-        return AVERROR(ENOENT);
+        return ret;
+    }
+
+    size = avio_size(ctx);
+    if (size < 0) {
+        av_log(log_ctx, AV_LOG_ERROR, "Failed to determine file size: %s\n", path.c_str());
+        return size;
     }
 
     try {
-        fs.seekg(0, std::ios::end);
-        size_t size = static_cast<size_t>(fs.tellg());
-        fs.seekg(0, std::ios::beg);
-
-        if (fs.fail()) {
-            av_log(log_ctx, AV_LOG_ERROR, "Failed to determine file size: %s\n", path.c_str());
-            return AVERROR(EIO);
-        }
-
         data.resize(size);
-        fs.read(data.data(), size);
-
-        if (fs.fail()) {
+        ret = avio_read(ctx, (unsigned char*)data.data(), size);
+        if (ret < 0) {
             av_log(log_ctx, AV_LOG_ERROR, "Failed to read file: %s\n", path.c_str());
+            return ret;
+        }
+        if (ret != size) {
+            av_log(log_ctx, AV_LOG_ERROR, "Incomplete read: %s\n", path.c_str());
             return AVERROR(EIO);
         }
-
-        return 0;
     } catch (const std::exception& e) {
         av_log(log_ctx, AV_LOG_ERROR, "Exception while reading file %s: %s\n", 
                path.c_str(), e.what());
         return AVERROR(ENOMEM);
     }
+
+    return 0;
 }
 
 int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path) {
@@ -120,6 +124,7 @@ int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path)
     if (th_model->clip_ctx->tokenizer) {
         return 0;
     }
+
     std::string blob;
     int ret = load_bytes_from_file(tokenizer_path, blob, th_model->ctx);
     if (ret < 0) {
@@ -128,11 +133,11 @@ int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path)
 
     try {
         th_model->clip_ctx->tokenizer = Tokenizer::FromBlobJSON(blob);
-        return 0;
     } catch (const c10::Error& e) {
         av_log(th_model->ctx, AV_LOG_ERROR, "Error creating tokenizer: %s\n", e.what());
         return AVERROR(EINVAL);
     }
+    return 0;
 }
 
 int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx) {
@@ -158,16 +163,16 @@ int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx) {
 int encode_image_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device) {
     THInferRequest *infer_request = request->infer_request;
     DnnContext *ctx = th_model->ctx;
-    
+
     try {               
         if (infer_request->input_tensor->device() != device) 
             *infer_request->input_tensor = infer_request->input_tensor->to(device);
-        
+
         // Apply CLIP specific normalization
         auto options = torch::TensorOptions().dtype(torch::kFloat32);
         auto mean = torch::tensor({0.48145466, 0.4578275, 0.40821073}, options).view({1, 3, 1, 1});
         auto std = torch::tensor({0.26862954, 0.26130258, 0.27577711}, options).view({1, 3, 1, 1});
-        
+
         *infer_request->input_tensor = (*infer_request->input_tensor - mean) / std;
 
         // Get image features
@@ -201,7 +206,7 @@ int encode_text_clip(const THModel *th_model, const THRequestItem *request, cons
 
         for (const auto& label : clip_ctx->labels) {
             torch::Tensor tokens = get_tokens(th_model, label);
-            
+
             if (tokens.device() != device) 
                 tokens = tokens.to(device);
 
@@ -210,14 +215,13 @@ int encode_text_clip(const THModel *th_model, const THRequestItem *request, cons
                 tokens, 
                 true // normalize
             );
-            
+
             if (!text_embedding.isTensor()) {
                 av_log(ctx, AV_LOG_ERROR, "Model returned invalid non-tensor output for text encoding\n");
                 return AVERROR(EINVAL);
             }
             infer_request->text_embeddings->push_back(text_embedding.toTensor());
         }
-        
         return 0;
     } catch (const c10::Error& e) {
         av_log(ctx, AV_LOG_ERROR, "Text encoding error: %s\n", e.what());
@@ -251,6 +255,7 @@ int fill_model_input_clip(const THModel *th_model, const THRequestItem *request,
     DnnContext *ctx = th_model->ctx;
     THInferRequest *infer_request = request->infer_request;
     *infer_request->output = infer_request->input_tensor->clone().detach();
+
     // Verify the clone worked
     if (!infer_request->output->defined() || infer_request->output->sizes() != infer_request->input_tensor->sizes()) {
         av_log(ctx, AV_LOG_ERROR, "Tensor cloning failed\n");
@@ -267,12 +272,14 @@ int fill_model_input_clip(const THModel *th_model, const THRequestItem *request,
 }
 
 int set_params_clip(const THModel *th_model, const char **labels, const int& label_count, const char *tokenizer_path) {
-    if (!th_model || !labels || label_count <= 0) {
+    if (!labels || label_count <= 0) {
+        av_log(th_model->ctx, AV_LOG_ERROR, "Label file invalid.\n");
         return AVERROR(EINVAL);
     }
+
     std::vector<std::string> label_vector;
     label_vector.reserve(label_count); 
-    
+
     for (int i = 0; i < label_count; i++) {
         if (labels[i]) {
             label_vector.emplace_back(labels[i]);
@@ -297,18 +304,19 @@ static torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image
 int process_clip_similarity(const THModel *th_model, const THRequestItem *request, const c10::Device& device) {
     DnnContext *ctx = th_model->ctx;
     THInferRequest *infer_request = request->infer_request;
-    LastLevelTaskItem *lltask = request->lltask;
-    auto image_features = infer_request->input_tensor;
-    auto text_embeddings = infer_request->text_embeddings;
     std::vector<float> similarity_scores;
-    similarity_scores.reserve(text_embeddings->size());
+    auto embedding_count = infer_request->text_embeddings->size();
+    similarity_scores.reserve(embedding_count);
 
     try {
-        auto device_image = image_features->to(device);
+        if(infer_request->input_tensor->device() != device)
+            *infer_request->input_tensor = infer_request->input_tensor->to(device);
 
-        for (size_t i = 0; i < text_embeddings->size(); i++) {
-            auto device_text_embedding = (*infer_request->text_embeddings)[i].to(device);
-            auto similarity = calculate_clip_similarity_matrix(device_image, device_text_embedding, th_model->clip_ctx->logit_scale, ctx);
+        for (size_t i = 0; i < embedding_count; i++) {
+            if((*infer_request->text_embeddings)[i].device() != device) {
+                (*infer_request->text_embeddings)[i] = (*infer_request->text_embeddings)[i].to(device);
+            }
+            auto similarity = calculate_clip_similarity_matrix(*infer_request->input_tensor, (*infer_request->text_embeddings)[i], th_model->clip_ctx->logit_scale, ctx);
             auto similarity_value = similarity.item<float>();
             similarity_scores.push_back(similarity_value);
 
@@ -340,7 +348,7 @@ int process_clip_similarity(const THModel *th_model, const THRequestItem *reques
 void free_clip_context(THClipContext *clip_ctx) {
     if (!clip_ctx)
         return;
-        
+
     clip_ctx->labels.clear();
     clip_ctx->tokenizer.release();
     av_freep(clip_ctx);

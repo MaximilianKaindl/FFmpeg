@@ -15,8 +15,8 @@
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
-#ifndef AVFILTER_DNN_BACKEND_TORCH_COMMON_H
-#define AVFILTER_DNN_BACKEND_TORCH_COMMON_H
+#ifndef AVFILTER_DNN_DNN_BACKEND_TORCH_COMMON_H
+#define AVFILTER_DNN_DNN_BACKEND_TORCH_COMMON_H
 
 #include <torch/script.h>
 #include <vector>
@@ -50,11 +50,11 @@ typedef struct THModel {
 typedef struct THInferRequest {
     torch::Tensor *output;
     torch::Tensor *input_tensor;
-    
+
     #if CONFIG_LIBTOKENIZERS
     std::vector<torch::Tensor> *text_embeddings;
     #endif
-    
+
 } THInferRequest;
 
 typedef struct THRequestItem {
