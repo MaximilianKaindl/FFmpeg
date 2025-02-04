@@ -67,7 +67,7 @@ enum Mpeg2ClosedCaptionsFormat {
     CC_FORMAT_A53_PART4,
     CC_FORMAT_SCTE20,
     CC_FORMAT_DVD,
-    CC_FORMAT_DVB_0502
+    CC_FORMAT_DISH
 };
 
 typedef struct Mpeg1Context {
@@ -1919,7 +1919,11 @@ static void mpeg_set_cc_format(AVCodecContext *avctx, enum Mpeg2ClosedCaptionsFo
         av_log(avctx, AV_LOG_DEBUG, "CC: first seen substream is %s format\n", label);
     }
 
+#if FF_API_CODEC_PROPS
+FF_DISABLE_DEPRECATION_WARNINGS
     avctx->properties |= FF_CODEC_PROPERTY_CLOSED_CAPTIONS;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
 }
 
 static int mpeg_decode_a53_cc(AVCodecContext *avctx,
@@ -1971,9 +1975,9 @@ static int mpeg_decode_a53_cc(AVCodecContext *avctx,
             ret = av_buffer_realloc(&s1->a53_buf_ref, new_size);
             if (ret >= 0) {
                 uint8_t field, cc1, cc2;
-                uint8_t *cap = s1->a53_buf_ref->data;
+                uint8_t *cap = s1->a53_buf_ref->data + old_size;
 
-                memset(s1->a53_buf_ref->data + old_size, 0, cc_count * 3);
+                memset(cap, 0, cc_count * 3);
                 for (i = 0; i < cc_count && get_bits_left(&gb) >= 26; i++) {
                     skip_bits(&gb, 2); // priority
                     field = get_bits(&gb, 2);
@@ -2043,7 +2047,7 @@ static int mpeg_decode_a53_cc(AVCodecContext *avctx,
             ret = av_buffer_realloc(&s1->a53_buf_ref, new_size);
             if (ret >= 0) {
                 uint8_t field1 = !!(p[4] & 0x80);
-                uint8_t *cap = s1->a53_buf_ref->data;
+                uint8_t *cap = s1->a53_buf_ref->data + old_size;
                 p += 5;
                 for (i = 0; i < cc_count; i++) {
                     cap[0] = (p[0] == 0xff && field1) ? 0xfc : 0xfd;
@@ -2060,39 +2064,39 @@ static int mpeg_decode_a53_cc(AVCodecContext *avctx,
             mpeg_set_cc_format(avctx, CC_FORMAT_DVD, "DVD");
         }
         return 1;
-    } else if ((!s1->cc_format || s1->cc_format == CC_FORMAT_DVB_0502) &&
+    } else if ((!s1->cc_format || s1->cc_format == CC_FORMAT_DISH) &&
                buf_size >= 12 &&
                p[0] == 0x05 && p[1] == 0x02) {
-        /* extract DVB 0502 CC data */
+        /* extract Dish Network CC data */
         const uint8_t cc_header = 0xf8 | 0x04 /* valid */ | 0x00 /* line 21 field 1 */;
         uint8_t cc_data[4] = {0};
         int cc_count = 0;
-        uint8_t dvb_cc_type = p[7];
+        uint8_t cc_type = p[7];
         p += 8;
         buf_size -= 8;
 
-        if (dvb_cc_type == 0x05 && buf_size >= 7) {
-            dvb_cc_type = p[6];
+        if (cc_type == 0x05 && buf_size >= 7) {
+            cc_type = p[6];
             p += 7;
             buf_size -= 7;
         }
 
-        if (dvb_cc_type == 0x02 && buf_size >= 4) { /* 2-byte caption, can be repeated */
+        if (cc_type == 0x02 && buf_size >= 4) { /* 2-byte caption, can be repeated */
             cc_count = 1;
             cc_data[0] = p[1];
             cc_data[1] = p[2];
-            dvb_cc_type = p[3];
+            cc_type = p[3];
 
             /* Only repeat characters when the next type flag
              * is 0x04 and the characters are repeatable (i.e., less than
              * 32 with the parity stripped).
              */
-            if (dvb_cc_type == 0x04 && (cc_data[0] & 0x7f) < 32) {
+            if (cc_type == 0x04 && (cc_data[0] & 0x7f) < 32) {
                 cc_count = 2;
                 cc_data[2] = cc_data[0];
                 cc_data[3] = cc_data[1];
             }
-        } else if (dvb_cc_type == 0x04 && buf_size >= 5) { /* 4-byte caption, not repeated */
+        } else if (cc_type == 0x04 && buf_size >= 5) { /* 4-byte caption, not repeated */
             cc_count = 2;
             cc_data[0] = p[1];
             cc_data[1] = p[2];
@@ -2109,17 +2113,18 @@ static int mpeg_decode_a53_cc(AVCodecContext *avctx,
 
             ret = av_buffer_realloc(&s1->a53_buf_ref, new_size);
             if (ret >= 0) {
-                s1->a53_buf_ref->data[0] = cc_header;
-                s1->a53_buf_ref->data[1] = cc_data[0];
-                s1->a53_buf_ref->data[2] = cc_data[1];
+                uint8_t *cap = s1->a53_buf_ref->data + old_size;
+                cap[0] = cc_header;
+                cap[1] = cc_data[0];
+                cap[2] = cc_data[1];
                 if (cc_count == 2) {
-                    s1->a53_buf_ref->data[3] = cc_header;
-                    s1->a53_buf_ref->data[4] = cc_data[2];
-                    s1->a53_buf_ref->data[5] = cc_data[3];
+                    cap[3] = cc_header;
+                    cap[4] = cc_data[2];
+                    cap[5] = cc_data[3];
                 }
             }
 
-            mpeg_set_cc_format(avctx, CC_FORMAT_DVB_0502, "DVB 0502");
+            mpeg_set_cc_format(avctx, CC_FORMAT_DISH, "Dish Network");
         }
         return 1;
     }
@@ -2682,7 +2687,7 @@ const FFCodec ff_mpeg1video_decoder = {
 static const AVOption mpeg2video_options[] = {
     { "cc_format", "extract a specific Closed Captions format",
        M2V_OFFSET(cc_format), AV_OPT_TYPE_INT, { .i64 = CC_FORMAT_AUTO },
-        CC_FORMAT_AUTO, CC_FORMAT_DVD, M2V_PARAM, .unit = "cc_format" },
+        CC_FORMAT_AUTO, CC_FORMAT_DISH, M2V_PARAM, .unit = "cc_format" },
 
        { "auto",   "pick first seen CC substream",  0, AV_OPT_TYPE_CONST,
         { .i64 =   CC_FORMAT_AUTO },                .flags = M2V_PARAM, .unit = "cc_format" },
@@ -2692,8 +2697,8 @@ static const AVOption mpeg2video_options[] = {
         { .i64 =   CC_FORMAT_SCTE20 },              .flags = M2V_PARAM, .unit = "cc_format" },
        { "dvd",    "pick DVD CC substream",         0, AV_OPT_TYPE_CONST,
         { .i64 =   CC_FORMAT_DVD },                 .flags = M2V_PARAM, .unit = "cc_format" },
-       { "dvb_0502", "pick DVB 0502 CC substream",  0, AV_OPT_TYPE_CONST,
-        { .i64 =   CC_FORMAT_DVB_0502 },            .flags = M2V_PARAM, .unit = "cc_format" },
+       { "dish",   "pick Dish Network CC substream", 0, AV_OPT_TYPE_CONST,
+        { .i64 =   CC_FORMAT_DISH },                .flags = M2V_PARAM, .unit = "cc_format" },
     { NULL }
 };
 

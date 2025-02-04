@@ -93,6 +93,14 @@ typedef void ID3D11Device;
 #define NVENC_HAVE_UNIDIR_B
 #endif
 
+// SDK 13.0 compile time feature checks
+#if NVENCAPI_CHECK_VERSION(13, 0)
+#define NVENC_HAVE_H264_10BIT_SUPPORT
+#define NVENC_HAVE_422_SUPPORT
+#define NVENC_HAVE_AV1_UHQ_TUNING
+#define NVENC_HAVE_H264_AND_AV1_TEMPORAL_FILTER
+#endif
+
 typedef struct NvencSurface
 {
     NV_ENC_INPUT_PTR input_surface;
@@ -151,6 +159,12 @@ enum {
     NV_ENC_H264_PROFILE_BASELINE,
     NV_ENC_H264_PROFILE_MAIN,
     NV_ENC_H264_PROFILE_HIGH,
+#ifdef NVENC_HAVE_H264_10BIT_SUPPORT
+    NV_ENC_H264_PROFILE_HIGH_10,
+#endif
+#ifdef NVENC_HAVE_422_SUPPORT
+    NV_ENC_H264_PROFILE_HIGH_422,
+#endif
     NV_ENC_H264_PROFILE_HIGH_444P,
 };
 
@@ -257,6 +271,8 @@ typedef struct NvencContext
     float quality;
     int aud;
     int bluray_compat;
+    int qmin;
+    int qmax;
     int init_qp_p;
     int init_qp_b;
     int init_qp_i;

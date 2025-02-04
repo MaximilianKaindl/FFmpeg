@@ -354,6 +354,7 @@ static void flv_set_audio_codec(AVFormatContext *s, AVStream *astream,
         return;
     case MKBETAG('O', 'p', 'u', 's'):
         apar->codec_id = AV_CODEC_ID_OPUS;
+        apar->sample_rate = 48000;
         return;
     case MKBETAG('.', 'm', 'p', '3'):
         apar->codec_id = AV_CODEC_ID_MP3;
@@ -380,6 +381,7 @@ static int flv_same_video_codec(AVCodecParameters *vpar, uint32_t flv_codecid)
         return 1;
 
     switch (flv_codecid) {
+    case FLV_CODECID_X_HEVC:
     case MKBETAG('h', 'v', 'c', '1'):
         return vpar->codec_id == AV_CODEC_ID_HEVC;
     case MKBETAG('a', 'v', '0', '1'):
@@ -413,6 +415,7 @@ static int flv_set_video_codec(AVFormatContext *s, AVStream *vstream,
     enum AVCodecID old_codec_id = vstream->codecpar->codec_id;
 
     switch (flv_codecid) {
+    case FLV_CODECID_X_HEVC:
     case MKBETAG('h', 'v', 'c', '1'):
         par->codec_id = AV_CODEC_ID_HEVC;
         vstreami->need_parsing = AVSTREAM_PARSE_HEADERS;
@@ -936,6 +939,7 @@ static int flv_read_close(AVFormatContext *s)
         av_freep(&flv->new_extradata[i]);
     for (i = 0; i < flv->mt_extradata_cnt; i++)
         av_freep(&flv->mt_extradata[i]);
+    av_freep(&flv->mt_extradata);
     av_freep(&flv->mt_extradata_sz);
     av_freep(&flv->keyframe_times);
     av_freep(&flv->keyframe_filepositions);
@@ -973,18 +977,22 @@ static int flv_queue_extradata(FLVContext *flv, AVIOContext *pb, int stream,
         int new_count = stream + 1;
 
         if (flv->mt_extradata_cnt < new_count) {
-            flv->mt_extradata = av_realloc(flv->mt_extradata,
-                                           sizeof(*flv->mt_extradata) *
-                                           new_count);
-            flv->mt_extradata_sz = av_realloc(flv->mt_extradata_sz,
-                                              sizeof(*flv->mt_extradata_sz) *
-                                              new_count);
-            if (!flv->mt_extradata || !flv->mt_extradata_sz)
+            void *tmp = av_realloc_array(flv->mt_extradata, new_count,
+                                         sizeof(*flv->mt_extradata));
+            if (!tmp)
                 return AVERROR(ENOMEM);
+            flv->mt_extradata = tmp;
+
+            tmp = av_realloc_array(flv->mt_extradata_sz, new_count,
+                                   sizeof(*flv->mt_extradata_sz));
+            if (!tmp)
+                return AVERROR(ENOMEM);
+            flv->mt_extradata_sz = tmp;
+
             // Set newly allocated pointers/sizes to 0
             for (int i = flv->mt_extradata_cnt; i < new_count; i++) {
-                    flv->mt_extradata[i] = NULL;
-                    flv->mt_extradata_sz[i] = 0;
+                flv->mt_extradata[i] = NULL;
+                flv->mt_extradata_sz[i] = 0;
             }
             flv->mt_extradata_cnt = new_count;
         }
@@ -1271,18 +1279,74 @@ static int flv_update_video_color_info(AVFormatContext *s, AVStream *st)
     return 0;
 }
 
+static int flv_parse_mod_ex_data(AVFormatContext *s, int *pkt_type, int *size, int64_t *dts)
+{
+    int ex_type, ret;
+    uint8_t *ex_data;
+
+    int ex_size = (uint8_t)avio_r8(s->pb) + 1;
+    *size -= 1;
+
+    if (ex_size == 256) {
+        ex_size = (uint16_t)avio_rb16(s->pb) + 1;
+        *size -= 2;
+    }
+
+    if (ex_size >= *size) {
+        av_log(s, AV_LOG_WARNING, "ModEx size larger than remaining data!\n");
+        return AVERROR(EINVAL);
+    }
+
+    ex_data = av_malloc(ex_size);
+    if (!ex_data)
+        return AVERROR(ENOMEM);
+
+    ret = avio_read(s->pb, ex_data, ex_size);
+    if (ret < 0) {
+        av_free(ex_data);
+        return ret;
+    }
+    *size -= ex_size;
+
+    ex_type = (uint8_t)avio_r8(s->pb);
+    *size -= 1;
+
+    *pkt_type = ex_type & 0x0f;
+    ex_type &= 0xf0;
+
+    if (ex_type == PacketModExTypeTimestampOffsetNano) {
+        uint32_t nano_offset;
+
+        if (ex_size != 3) {
+            av_log(s, AV_LOG_WARNING, "Invalid ModEx size for Type TimestampOffsetNano!\n");
+            nano_offset = 0;
+        } else {
+            nano_offset = (ex_data[0] << 16) | (ex_data[1] << 8) | ex_data[2];
+        }
+
+        // this is not likely to ever add anything, but right now timestamps are with ms precision
+        *dts += nano_offset / 1000000;
+    } else {
+        av_log(s, AV_LOG_INFO, "Unknown ModEx type: %d", ex_type);
+    }
+
+    av_free(ex_data);
+
+    return 0;
+}
+
 static int flv_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     FLVContext *flv = s->priv_data;
-    int ret, i, size, flags;
+    int ret = AVERROR_BUG, i, size, flags;
     int res = 0;
     enum FlvTagType type;
-    int stream_type=-1;
+    int stream_type = -1;
     int64_t next, pos, meta_pos;
     int64_t dts, pts = AV_NOPTS_VALUE;
     int av_uninit(channels);
     int av_uninit(sample_rate);
-    AVStream *st    = NULL;
+    AVStream *st = NULL;
     int last = -1;
     int orig_size;
     int enhanced_flv = 0;
@@ -1339,6 +1403,12 @@ retry:
             enhanced_flv = 1;
             pkt_type = flags & ~FLV_AUDIO_CODECID_MASK;
 
+            while (pkt_type == PacketTypeModEx) {
+                ret = flv_parse_mod_ex_data(s, &pkt_type, &size, &dts);
+                if (ret < 0)
+                    goto leave;
+            }
+
             if (pkt_type == AudioPacketTypeMultitrack) {
                 uint8_t types = avio_r8(s->pb);
                 multitrack_type = types & 0xF0;
@@ -1367,6 +1437,16 @@ retry:
         enhanced_flv = (flags >> 7) & 1;
         pkt_type = enhanced_flv ? codec_id : 0;
         size--;
+
+        while (pkt_type == PacketTypeModEx) {
+            ret = flv_parse_mod_ex_data(s, &pkt_type, &size, &dts);
+            if (ret < 0)
+                goto leave;
+        }
+
+        if (enhanced_flv && pkt_type != PacketTypeMetadata &&
+            (flags & FLV_VIDEO_FRAMETYPE_MASK) == FLV_FRAME_VIDEO_INFO_CMD)
+            goto skip;
 
         if (pkt_type == PacketTypeMultitrack) {
             uint8_t types = avio_r8(s->pb);
@@ -1585,6 +1665,7 @@ retry_duration:
                     for (i = 0; i < channels; i++) {
                         uint8_t id = avio_r8(s->pb);
                         size--;
+                        track_size--;
 
                         if (id < 18)
                             st->codecpar->ch_layout.u.map[i].id = id;
@@ -1611,7 +1692,7 @@ retry_duration:
 
                 av_log(s, AV_LOG_DEBUG, "Set channel data from MultiChannel info.\n");
 
-                goto leave;
+                goto next_track;
             }
         } else if (stream_type == FLV_STREAM_TYPE_VIDEO) {
             int sret = flv_set_video_codec(s, st, codec_id, 1);
@@ -1653,8 +1734,8 @@ retry_duration:
             }
 
             if (st->codecpar->codec_id == AV_CODEC_ID_MPEG4 ||
-                (st->codecpar->codec_id == AV_CODEC_ID_H264 && (!enhanced_flv || type == PacketTypeCodedFrames)) ||
-                (st->codecpar->codec_id == AV_CODEC_ID_HEVC && type == PacketTypeCodedFrames)) {
+                ((st->codecpar->codec_id == AV_CODEC_ID_H264 || st->codecpar->codec_id == AV_CODEC_ID_HEVC) &&
+                 (!enhanced_flv || type == PacketTypeCodedFrames))) {
                 // sign extension
                 int32_t cts = (avio_rb24(s->pb) + 0xff800000) ^ 0xff800000;
                 pts = av_sat_add64(dts, cts);
@@ -1757,6 +1838,7 @@ retry_duration:
             return ret;
         res = FFERROR_REDO;
 
+next_track:
         if (track_size) {
             av_log(s, AV_LOG_WARNING, "Track size mismatch: %d!\n", track_size);
             avio_skip(s->pb, track_size);
@@ -1766,7 +1848,6 @@ retry_duration:
         if (!size)
             break;
 
-next_track:
         if (multitrack_type == MultitrackTypeOneTrack) {
             av_log(s, AV_LOG_ERROR, "Attempted to read next track in single-track mode.\n");
             ret = FFERROR_REDO;
@@ -1788,6 +1869,7 @@ next_track:
         }
     }
 
+    ret = 0;
 leave:
     last = avio_rb32(s->pb);
     if (!flv->trust_datasize) {
