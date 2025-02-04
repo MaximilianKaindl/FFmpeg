@@ -265,6 +265,7 @@ extern const FFFilter ff_vf_dnn_classify;
 extern const FFFilter ff_vf_dnn_detect;
 extern const FFFilter ff_vf_dnn_processing;
 extern const FFFilter ff_vf_dnn_clip;
+extern const FFFilter ff_vf_avgclass;
 extern const FFFilter ff_vf_doubleweave;
 extern const FFFilter ff_vf_drawbox;
 extern const FFFilter ff_vf_drawgraph;
