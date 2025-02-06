@@ -28,7 +28,7 @@
 #include "dnn_filter_common.h"
 #include "video.h"
 #include "libavutil/time.h"
-#include "libavutil/detection_bbox.h"
+#include "libavutil/clip_bbox.h"
 #include "libavutil/avstring.h"
 
 typedef struct DNNCLIPContext {
@@ -64,14 +64,13 @@ AVFILTER_DNN_DEFINE_CLASS(dnn_clip, DNN_TH);
 static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
     DNNCLIPContext *ctx = filter_ctx->priv;
-    const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
+    const int max_classes_per_box = AV_CLIP_BBOX_CLASSES_MAX_COUNT;
     int num_labels = ctx->label_count;
     float *probabilities = (float*)output->data;
     int num_bboxes;
-    size_t side_data_size;
     AVFrameSideData *sd;
-    AVDetectionBBoxHeader *header;
-    AVDetectionBBox *bbox;
+    AVClipBBoxHeader *header;
+    AVClipBBox *bbox;
     int i, j;
     int start_idx, end_idx;
     int percentage;
@@ -79,45 +78,33 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
     // Calculate number of bounding boxes needed 
     num_bboxes = (num_labels + max_classes_per_box - 1) / max_classes_per_box;
 
-    // Calculate total size needed 
-    side_data_size = sizeof(AVDetectionBBoxHeader) +
-                    (num_bboxes * sizeof(AVDetectionBBox));
-
-    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-    if (sd) {
-        av_log(filter_ctx, AV_LOG_ERROR, "Found Detection Box of Detect Filter. Detect is not compatible with CLIP Filter yet. Detection Boxes get replaced ... %zu\n", side_data_size);
-        av_frame_remove_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_CLIP_BBOXES);
+    if (sd != NULL) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Found existing Clip BBox. Box gets replaced ... \n");
+        av_frame_remove_side_data(frame, AV_FRAME_DATA_CLIP_BBOXES);
     }
 
-    sd = av_frame_new_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES, side_data_size);
-    if (!sd) {
-        av_log(filter_ctx, AV_LOG_ERROR, "Failed to allocate side data of size %zu\n", side_data_size);
+    header = av_clip_bbox_create_side_data(frame, num_bboxes);
+    if (!header) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to allocate side data for clip classification\n");
         return AVERROR(ENOMEM);
     }
 
-    // Zero initialize the entire side data 
-    memset(sd->data, 0, side_data_size);
-
-    header = (AVDetectionBBoxHeader *)sd->data;
-    header->nb_bboxes = num_bboxes;
-    header->bbox_size = sizeof(AVDetectionBBox);
-    av_strlcpy(header->source, "clip", sizeof(header->source));
+    if (bbox_index == 0) {
+        av_strlcat(header->source, ", ", sizeof(header->source));
+        av_strlcat(header->source, ctx->dnnctx.model_filename, sizeof(header->source));
+    }
 
     //Process each bbox 
     for (i = 0; i < num_bboxes; i++) {
-        bbox = av_get_detection_bbox(header, i);
+        bbox = av_get_clip_bbox(header, i);
         if (!bbox) {
             av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", i);
             return AVERROR(EINVAL);
         }
 
         // Initialize bbox 
-        bbox->x = 0;
-        bbox->y = 0;
-        bbox->w = frame->width;
-        bbox->h = frame->height;
         bbox->classify_count = 0;
-        bbox->detect_label[0] = '\0';
 
         start_idx = i * max_classes_per_box;
         end_idx = FFMIN(num_labels, (i + 1) * max_classes_per_box);
@@ -129,12 +116,11 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
                 continue;
             }
 
-            percentage = (int)(probabilities[j] * 100);
-            bbox->classify_confidences[bbox->classify_count] = av_make_q(percentage, 100);
+            percentage = (int)(probabilities[j] * 10000);
+            bbox->classify_confidences[bbox->classify_count] = av_make_q(percentage, 10000);
             av_strlcpy(bbox->classify_labels[bbox->classify_count],
                       ctx->labels[j],
-                      sizeof(bbox->classify_labels[0]));
-
+                      AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE);
             bbox->classify_count++;
         }
     }
@@ -181,7 +167,7 @@ static int read_classify_label_file(AVFilterContext *context)
         if (line_len == 0)
             continue;
 
-        if (line_len >= AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) {
+        if (line_len * sizeof(char) > AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE) {
             av_log(context, AV_LOG_ERROR, "Text prompt %s too long\n", buf);
             fclose(file);
             return AVERROR(EINVAL);
