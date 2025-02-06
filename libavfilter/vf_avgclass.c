@@ -28,11 +28,11 @@
 #include "dnn_filter_common.h"
 #include "video.h"
 #include "libavutil/time.h"
-#include "libavutil/detection_bbox.h"
+#include "libavutil/clip_bbox.h"
 #include "libavutil/avstring.h"
 
 typedef struct ClassProb {
-    char    label[AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE];
+    char    label[AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE];
     int64_t count;
     double  sum;
 } ClassProb;
@@ -123,28 +123,86 @@ static int process_frame(AVFilterContext *ctx, AVFrame *frame)
 {
     AvgClassContext *s = ctx->priv;
     AVFrameSideData *sd;
-    const AVDetectionBBoxHeader *header;
-    const AVDetectionBBox *bbox;
+    const AVClipBBoxHeader *header;
+    const AVClipBBox *bbox;
     int i, j;
+    double prob;
     ClassProb *class_prob;
 
-    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-    if (sd) {
-        header = (const AVDetectionBBoxHeader *)sd->data;
-        for (i = 0; i < header->nb_bboxes; i++) {
-            bbox = av_get_detection_bbox(header, i);
-            for (j = 0; j < bbox->classify_count; j++) {
-                double prob = (double)bbox->classify_confidences[j].num /
-                            bbox->classify_confidences[j].den;
+    
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_CLIP_BBOXES);
+    if (!sd || sd->size < sizeof(AVClipBBoxHeader)) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid clip bbox side data\n"); 
+        return 0;
+    }   
 
-                class_prob = find_or_create_class(s, bbox->classify_labels[j]);
-                if (!class_prob) {
-                    return AVERROR(ENOMEM);
-                }
+    header = (const AVClipBBoxHeader *)sd->data;
 
-                class_prob->sum += prob;
-                class_prob->count++;
+    if (!header || sd->size < sizeof(AVClipBBoxHeader)) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid clip bbox header\n");
+        return 0;
+    }
+
+    if (header->nb_bboxes <= 0 || header->nb_bboxes > AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid number or no bboxes\n");
+        return 0;
+    }
+    
+    for (i = 0; i < header->nb_bboxes; i++) {
+        bbox = av_get_clip_bbox(header, i);
+        if (!bbox) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to get bbox at index %d\n", i);
+            continue;
+        }
+
+        if (bbox->classify_count <= 0) {
+            continue;
+        }
+
+        // Validate classification arrays
+        if (!bbox->classify_labels || !bbox->classify_confidences) {
+            av_log(ctx, AV_LOG_ERROR, "Missing classification data at bbox %d\n", i);
+            continue;
+        }
+
+        for (j = 0; j < bbox->classify_count; j++) {
+            // Check confidence values before division
+            if (bbox->classify_confidences[j].den <= 0) {
+                av_log(ctx, AV_LOG_DEBUG, "Invalid confidence at bbox %d class %d: num=%d den=%d\n",
+                       i, j, bbox->classify_confidences[j].num, bbox->classify_confidences[j].den);
+                continue;
             }
+
+            if (!bbox->classify_labels[j]) {
+                av_log(ctx, AV_LOG_ERROR, "NULL label at bbox %d class %d\n", i, j);
+                continue;
+            }
+            if (bbox->classify_confidences[j].num == 0) {
+                prob = 0.0;
+            } else {
+                prob = (double)bbox->classify_confidences[j].num / bbox->classify_confidences[j].den;
+                // Sanity check on probability value
+                if (prob < 0.0 || prob > 1.0) {
+                    av_log(ctx, AV_LOG_WARNING, "Probability out of range [0,1] at bbox %d class %d: %f\n",
+                           i, j, prob);
+                    continue;
+                }
+                av_log(ctx, AV_LOG_DEBUG, "Label: %s, Confidence: %.6f\n", bbox->classify_labels[j], prob);
+
+            }
+            if (prob < 0.0 || prob > 1.0) {
+                av_log(ctx, AV_LOG_WARNING, "Probability out of range [0,1] at bbox %d class %d: %f\n",
+                        i, j, prob);
+                continue;
+            }
+
+            class_prob = find_or_create_class(s, bbox->classify_labels[j]);
+            if (!class_prob) {
+                return AVERROR(ENOMEM);
+            }
+
+            class_prob->sum += prob;
+            class_prob->count++;
         }
     }
     return 0;
