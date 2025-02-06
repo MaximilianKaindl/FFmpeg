@@ -23,21 +23,21 @@
 #include "avassert.h"
 #include "frame.h"
  
-#define AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE 64
-#define AV_CLIP_BBOX_CLASSES_MAX_COUNT 4
 
 typedef struct AVClipBBox {
+#define AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE 256
+#define AV_CLIP_BBOX_CLASSES_MAX_COUNT 4
     uint32_t classify_count;
     char classify_labels[AV_CLIP_BBOX_CLASSES_MAX_COUNT][AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE];
     AVRational classify_confidences[AV_CLIP_BBOX_CLASSES_MAX_COUNT]; 
-} AVClipBBox __attribute__((packed));
+} AVClipBBox;
 
 typedef struct AVClipBBoxHeader {
-    char source[256];
+    char source[128];
     uint32_t nb_bboxes;
     size_t bboxes_offset;
     size_t bbox_size;
-} AVClipBBoxHeader __attribute__((packed));
+} AVClipBBoxHeader;
 
 static av_always_inline AVClipBBox *
 av_get_clip_bbox(const AVClipBBoxHeader *header, unsigned int idx) {

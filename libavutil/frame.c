@@ -44,6 +44,7 @@ static const AVSideDataDescriptor sd_props[] = {
     [AV_FRAME_DATA_VIDEO_ENC_PARAMS]            = { "Video encoding parameters" },
     [AV_FRAME_DATA_FILM_GRAIN_PARAMS]           = { "Film grain parameters" },
     [AV_FRAME_DATA_DETECTION_BBOXES]            = { "Bounding boxes for object detection and classification", AV_SIDE_DATA_PROP_SIZE_DEPENDENT },
+    [AV_FRAME_DATA_CLIP_BBOXES]                 = { "Bounding boxes for clip classification"      , AV_SIDE_DATA_PROP_SIZE_DEPENDENT },
     [AV_FRAME_DATA_DOVI_RPU_BUFFER]             = { "Dolby Vision RPU Data",                        AV_SIDE_DATA_PROP_COLOR_DEPENDENT },
     [AV_FRAME_DATA_DOVI_METADATA]               = { "Dolby Vision Metadata",                        AV_SIDE_DATA_PROP_COLOR_DEPENDENT },
     [AV_FRAME_DATA_LCEVC]                       = { "LCEVC NAL data",                               AV_SIDE_DATA_PROP_SIZE_DEPENDENT },

@@ -25,6 +25,7 @@ HEADERS = adler32.h                                                     \
           csp.h                                                         \
           des.h                                                         \
           detection_bbox.h                                              \
+          clip_bbox.h                                              \
           dict.h                                                        \
           display.h                                                     \
           dovi_meta.h                                                   \
@@ -127,6 +128,7 @@ OBJS = adler32.o                                                        \
        csp.o                                                            \
        des.o                                                            \
        detection_bbox.o                                                 \
+       clip_bbox.o                                                 \
        dict.o                                                           \
        display.o                                                        \
        dovi_meta.o                                                      \
