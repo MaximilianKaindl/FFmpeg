@@ -19,7 +19,9 @@
 #define AVFILTER_DNN_DNN_BACKEND_TORCH_COMMON_H
 
 #include <torch/script.h>
-#include <vector>
+#include <torch/torch.h>
+#include <c10/cuda/CUDAStream.h>
+#include <ATen/cuda/CUDAContext.h>
 
 struct THClipContext;
 
