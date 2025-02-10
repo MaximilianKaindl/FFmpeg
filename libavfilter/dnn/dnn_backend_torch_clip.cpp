@@ -169,7 +169,7 @@ int encode_image_clip(const THModel *th_model, const THRequestItem *request, con
             *infer_request->input_tensor = infer_request->input_tensor->to(device);
 
         // Apply CLIP specific normalization
-        auto options = torch::TensorOptions().dtype(torch::kFloat32);
+        auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device);
         auto mean = torch::tensor({0.48145466, 0.4578275, 0.40821073}, options).view({1, 3, 1, 1});
         auto std = torch::tensor({0.26862954, 0.26130258, 0.27577711}, options).view({1, 3, 1, 1});
 
