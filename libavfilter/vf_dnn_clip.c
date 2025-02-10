@@ -167,7 +167,7 @@ static int read_classify_label_file(AVFilterContext *context)
         if (line_len == 0)
             continue;
 
-        if (line_len * sizeof(char) > AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE) {
+        if (line_len > AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE) {
             av_log(context, AV_LOG_ERROR, "Text prompt %s too long\n", buf);
             fclose(file);
             return AVERROR(EINVAL);

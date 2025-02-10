@@ -25,7 +25,7 @@
  
 
 typedef struct AVClipBBox {
-#define AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE 256
+#define AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE 128
 #define AV_CLIP_BBOX_CLASSES_MAX_COUNT 4
     uint32_t classify_count;
     char classify_labels[AV_CLIP_BBOX_CLASSES_MAX_COUNT][AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE];
