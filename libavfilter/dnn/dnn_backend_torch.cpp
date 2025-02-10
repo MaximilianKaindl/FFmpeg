@@ -480,7 +480,37 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
             av_log(ctx, AV_LOG_ERROR, "No XPU device found\n");
             goto fail;
         }
-        at::detail::getXPUHooks().initXPU();
+        at::detail::getXPUHooks().init();
+    } else if (device.is_cuda()) {
+        if (!torch::cuda::is_available()) {
+            av_log(ctx, AV_LOG_ERROR, "CUDA is not available!\n");
+            goto fail;
+        }
+        // Initialize CUDA
+        try {
+            int device_idx = 0;
+            const char* device_num = strstr(device_name, ":");
+            if (device_num) {
+                char* endptr = NULL;
+                device_idx = strtol(device_num + 1, &endptr, 10);
+                if (*endptr != '\0' && !isspace(*endptr)) {
+                    av_log(ctx, AV_LOG_ERROR, "Invalid device number format: %s\n", device_num + 1);
+                    goto fail;
+                }
+            }
+            if (device_idx >= static_cast<int>(torch::cuda::device_count())) {
+                av_log(ctx, AV_LOG_ERROR, "Requested CUDA device %d but only %ld devices available\n", 
+                    device_idx, torch::cuda::device_count());
+                goto fail;
+            }
+            c10::cuda::set_device(device_idx);
+            c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());   
+            torch::cuda::synchronize();
+            
+        } catch (const c10::Error& e) {
+            av_log(ctx, AV_LOG_ERROR, "CUDA initialization failed: %s\n", e.what());
+            goto fail;
+        }
     } else if (!device.is_cpu()) {
         av_log(ctx, AV_LOG_ERROR, "Not supported device:\"%s\"\n", device_name);
         goto fail;
