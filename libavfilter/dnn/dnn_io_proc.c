@@ -420,58 +420,6 @@ int ff_frame_to_dnn_classify(AVFrame *frame, DNNData *input, uint32_t bbox_index
     return ret;
 }
 
-int ff_frame_to_dnn_clip(AVFrame *frame, DNNData *input, void *log_ctx)
-{
-    struct SwsContext *sws_ctx;
-    int linesizes[4];
-    int ret = 0;
-    enum AVPixelFormat fmt;
-    fmt = AV_PIX_FMT_RGB24;
-    float *float_data = (float *)input->data;
-
-    // Initialize scaling context to 224x224 RGB24
-    sws_ctx = sws_getContext(frame->width, frame->height, frame->format,
-                        224, 224, AV_PIX_FMT_RGB24,
-                        SWS_FAST_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND,
-                        sws_getDefaultFilter(0, 0, 0, 0, 0, 0, 0),
-                        NULL,
-                        NULL);
-    if (!sws_ctx) {
-        av_log(log_ctx, AV_LOG_ERROR, "Failed to create scale context\n");
-        return AVERROR(EINVAL);
-    }
-
-    ret = av_image_fill_linesizes(linesizes, fmt, 224);
-    if (ret < 0) {
-        av_log(log_ctx, AV_LOG_ERROR, "Unable to get linesizes\n");
-        sws_freeContext(sws_ctx);
-        return ret;
-    }
-
-    // Temporary buffer for RGB24 data
-    uint8_t *rgb_data = av_malloc(224 * 224 * 3);
-    if (!rgb_data) {
-        sws_freeContext(sws_ctx);
-        return AVERROR(ENOMEM);
-    }
-
-    // Scale to RGB24
-    sws_scale(sws_ctx, frame->data, frame->linesize,
-              0, frame->height,
-              (uint8_t *const [4]){rgb_data, 0, 0, 0}, linesizes);
-
-    // Convert RGB24 to float and normalize to [0,1]
-    for (int i = 0; i < 224 * 224; i++) {
-        float_data[i] = rgb_data[i * 3] / 255.0f;                    // R
-        float_data[i + 224 * 224] = rgb_data[i * 3 + 1] / 255.0f;   // G
-        float_data[i + 2 * 224 * 224] = rgb_data[i * 3 + 2] / 255.0f; // B
-    }
-
-    av_free(rgb_data);
-    sws_freeContext(sws_ctx);
-    return ret;
-}
-
 int ff_frame_to_dnn_detect(AVFrame *frame, DNNData *input, void *log_ctx)
 {
     struct SwsContext *sws_ctx;

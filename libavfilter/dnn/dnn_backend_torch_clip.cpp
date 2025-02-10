@@ -168,12 +168,32 @@ int encode_image_clip(const THModel *th_model, const THRequestItem *request, con
         if (infer_request->input_tensor->device() != device) 
             *infer_request->input_tensor = infer_request->input_tensor->to(device);
 
+        // Step 1: Resize using bicubic interpolation
+        auto resized = torch::nn::functional::interpolate(
+            *infer_request->input_tensor,
+            torch::nn::functional::InterpolateFuncOptions()
+                .size(std::vector<int64_t>{224, 224})
+                .mode(torch::kBicubic)
+                .align_corners(false)
+        );
+
+        //Manual center crop if needed
+        auto h = resized.size(2);
+        auto w = resized.size(3);
+        int64_t crop_size = 224;
+        
+        int64_t h_start = (h - crop_size) / 2;
+        int64_t w_start = (w - crop_size) / 2;
+        
+        auto cropped = resized.slice(2, h_start, h_start + crop_size)
+                             .slice(3, w_start, w_start + crop_size);
+
         // Apply CLIP specific normalization
         auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device);
         auto mean = torch::tensor({0.48145466, 0.4578275, 0.40821073}, options).view({1, 3, 1, 1});
         auto std = torch::tensor({0.26862954, 0.26130258, 0.27577711}, options).view({1, 3, 1, 1});
-
-        *infer_request->input_tensor = (*infer_request->input_tensor - mean) / std;
+        
+        *infer_request->input_tensor = (cropped - mean) / std;
 
         // Get image features
         auto image_features = th_model->jit_model->run_method(

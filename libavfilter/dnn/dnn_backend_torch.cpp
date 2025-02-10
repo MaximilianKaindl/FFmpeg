@@ -169,17 +169,8 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     width_idx = dnn_get_width_idx_by_layout(input.layout);
     height_idx = dnn_get_height_idx_by_layout(input.layout);
     channel_idx = dnn_get_channel_idx_by_layout(input.layout);
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    if (th_model->is_clip_model) {
-        input.dims[height_idx] = 224;
-        input.dims[width_idx] = 224;
-    } else {
-    #endif
-        input.dims[height_idx] = task->in_frame->height;
-        input.dims[width_idx] = task->in_frame->width;
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    }
-    #endif
+    input.dims[height_idx] = task->in_frame->height;
+    input.dims[width_idx] = task->in_frame->width;
     input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
                            input.dims[channel_idx] * sizeof(float));
     if (!input.data)
@@ -189,6 +180,9 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
 
     switch (th_model->model.func_type) {
     case DFT_PROCESS_FRAME:
+    #if (CONFIG_LIBTOKENIZERS == 1)
+    case DFT_ANALYTICS_CLIP:
+    #endif
         input.scale = 255;
         if (task->do_ioproc) {
             if (th_model->model.frame_pre_proc != NULL) {
@@ -198,13 +192,6 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
             }
         }
         break;
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    case DFT_ANALYTICS_CLIP:
-        if (task->do_ioproc) {
-            ff_frame_to_dnn_clip(task->in_frame, &input, ctx);              
-        }
-        break;
-    #endif
     default:
         avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
         break;
