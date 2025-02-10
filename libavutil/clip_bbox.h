@@ -41,7 +41,6 @@ typedef struct AVClipBBoxHeader {
 
 static av_always_inline AVClipBBox *
 av_get_clip_bbox(const AVClipBBoxHeader *header, unsigned int idx) {
-    av_assert0(header->nb_bboxes < AV_CLIP_BBOX_CLASSES_MAX_COUNT + 1);
     av_assert0(idx < header->nb_bboxes);
     return (AVClipBBox *)((uint8_t *)header + header->bboxes_offset +
                           idx * header->bbox_size);
