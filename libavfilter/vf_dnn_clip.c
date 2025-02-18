@@ -31,13 +31,71 @@
 #include "libavutil/clip_bbox.h"
 #include "libavutil/avstring.h"
 
+/*
+    Labels that are being used to classify the image
+*/
+typedef struct ClassifyLabelContext {
+    char **labels;
+    int label_count;
+} ClassifyLabelContext;
+
+/*
+    Header (Attribute) that is being described by all its labels. 
+    (name) in labels file
+
+    e.g. 
+    (Comic)
+    a drawn image
+    a fictional character
+    ...
+*/
+typedef struct ClassifyCategory {
+    char *name;
+    ClassifyLabelContext *labels;
+    int label_count;
+    float total_probability;
+} ClassifyCategory;
+
+/*
+    Single unit that is being classified 
+    [name] in categories file
+
+    e.g.
+    [RecordingSystem]
+    (Professional)
+    a photo with high level of detail 
+    ...
+*/
+typedef struct ClassifyContext {
+    char *name;
+    ClassifyCategory *categories;
+    int category_count;
+    int label_count;
+    int max_categories;
+} ClassifyContext;
+
 typedef struct DNNCLIPContext {
     const AVClass *clazz;
     DnnContext dnnctx;
-    char *labels_filename;      
-    char *tokenizer_path;       
-    char **labels;
-    int label_count;
+
+    // used to store labels and categories if labels_filename is specified
+    ClassifyLabelContext *label_ctx;
+
+    // classify in categories
+    // used to store labels and categories if categories_filename is specified
+    ClassifyContext **classifcation_ctx;
+    int num_contexts;
+    int max_contexts;
+    int total_labels;
+    int total_categories;
+
+    // Parameters to change Results of the simularity calculation
+    float logit_scale;
+    float temperature;
+
+    char *labels_filename;
+    char *categories_filename;
+    char *tokenizer_path;
 } DNNCLIPContext;
 
 #define OFFSET(x) offsetof(DNNCLIPContext, dnnctx.x)
@@ -54,6 +112,12 @@ static const AVOption dnn_clip_options[] = {
 #endif
     { "labels", "path to text prompts file", 
         OFFSET2(labels_filename), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
+    {"categories", "path to categories and prompts file", 
+        OFFSET2(categories_filename), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
+    { "logit_scale", "logit scale to scale logits", 
+        OFFSET2(logit_scale), AV_OPT_TYPE_FLOAT, { .dbl = 4.6052 }, 0, 100.0, FLAGS },
+    { "temperature", "softmax temperature", 
+        OFFSET2(temperature), AV_OPT_TYPE_FLOAT, { .dbl = 1.0 }, 0, 100.0, FLAGS },
     { "tokenizer", "path to text tokenizer.json file", 
         OFFSET2(tokenizer_path), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
     { NULL }
@@ -61,12 +125,64 @@ static const AVOption dnn_clip_options[] = {
 
 AVFILTER_DNN_DEFINE_CLASS(dnn_clip, DNN_TH);
 
-static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
+static int softmax(float *input, size_t input_len, float logit_scale, float temperature, AVFilterContext *ctx) 
+{
+    // Input validation
+    if (!input) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid input pointer to softmax\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (input_len == 0) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid input length for softmax\n");
+        return AVERROR(EINVAL);
+    }
+
+    // Ensure valid temperature
+    if (temperature <= 0.0f) {
+        temperature = 1.0f;
+    }
+    
+    // Apply logit scale to inputs (in-place)
+    for (size_t i = 0; i < input_len; i++) {
+        input[i] *= logit_scale;
+    }
+
+    // Find maximum for numerical stability
+    float m = input[0];
+    for (size_t i = 1; i < input_len; i++) {
+        if (input[i] > m) {
+            m = input[i];
+        }
+    }
+
+    // Calculate sum with temperature
+    float sum = 0.0f;
+    for (size_t i = 0; i < input_len; i++) {
+        sum += expf((input[i] - m) / temperature);
+    }
+
+    if (sum == 0.0f) {
+        av_log(ctx, AV_LOG_ERROR, "Division by zero in softmax\n");
+        return AVERROR(EINVAL);
+    }
+
+    // Apply softmax with temperature
+    float offset = m + temperature * logf(sum);
+    for (size_t i = 0; i < input_len; i++) {
+        input[i] = expf((input[i] - offset) / temperature);
+    }
+
+    return 0;
+}
+
+static int dnn_clip_post_proc_lables(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
     DNNCLIPContext *ctx = filter_ctx->priv;
     const int max_classes_per_box = AV_CLIP_BBOX_CLASSES_MAX_COUNT;
-    int num_labels = ctx->label_count;
-    float *probabilities = (float*)output->data;
+    int num_labels = ctx->label_ctx->label_count;
+    float *probabilities = (float *)output->data;
+    softmax(probabilities,num_labels, ctx->logit_scale, ctx->temperature,filter_ctx);
     int num_bboxes;
     AVFrameSideData *sd;
     AVClipBBoxHeader *header;
@@ -75,7 +191,7 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
     int start_idx, end_idx;
     int percentage;
 
-    // Calculate number of bounding boxes needed 
+    // Calculate number of bounding boxes needed
     num_bboxes = (num_labels + max_classes_per_box - 1) / max_classes_per_box;
 
     sd = av_frame_get_side_data(frame, AV_FRAME_DATA_CLIP_BBOXES);
@@ -95,7 +211,7 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
         av_strlcat(header->source, ctx->dnnctx.model_filename, sizeof(header->source));
     }
 
-    //Process each bbox 
+    //Process each bbox
     for (i = 0; i < num_bboxes; i++) {
         bbox = av_get_clip_bbox(header, i);
         if (!bbox) {
@@ -103,7 +219,7 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
             return AVERROR(EINVAL);
         }
 
-        // Initialize bbox 
+        // Initialize bbox
         bbox->classify_count = 0;
 
         start_idx = i * max_classes_per_box;
@@ -111,7 +227,7 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
 
         // Set classifications for this bbox
         for (j = start_idx; j < end_idx && bbox->classify_count < max_classes_per_box; j++) {
-            if (!ctx->labels[j]) {
+            if (!ctx->label_ctx->labels[j]) {
                 av_log(filter_ctx, AV_LOG_ERROR, "Invalid label at index %d\n", j);
                 continue;
             }
@@ -119,8 +235,8 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
             percentage = (int)(probabilities[j] * 10000);
             bbox->classify_confidences[bbox->classify_count] = av_make_q(percentage, 10000);
             av_strlcpy(bbox->classify_labels[bbox->classify_count],
-                      ctx->labels[j],
-                      AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE);
+                       ctx->label_ctx->labels[j],
+                       AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE);
             bbox->classify_count++;
         }
     }
@@ -128,12 +244,194 @@ static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
     return 0;
 }
 
-static void free_classify_labels(DNNCLIPContext *ctx)
+static int dnn_clip_post_proc_categories(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx) 
 {
-    for (int i = 0; i < ctx->label_count; i++)
-        av_freep(&ctx->labels[i]);
-    ctx->label_count = 0;
-    av_freep(&ctx->labels);
+    DNNCLIPContext *ctx = filter_ctx->priv;
+    float *probabilities = (float *)output->data;
+    AVFrameSideData *sd;
+    AVClipBBoxHeader *header;
+    AVClipBBox *bbox;
+    int ret = 0;
+    const int max_classes_per_box = AV_CLIP_BBOX_CLASSES_MAX_COUNT;
+    
+    // Create side data for this classification context
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_CLIP_BBOXES);
+    if (sd == NULL) {
+        // Calculate total number of bboxes needed for all categories across all contexts
+        int total_categories = 0;
+        for(int c = 0; c < ctx->num_contexts; c++) {
+            ClassifyContext *current_ctx = ctx->classifcation_ctx[c];
+            if (current_ctx) {
+                total_categories += current_ctx->category_count;
+            }
+        }
+        
+        // Calculate number of bboxes needed to hold all categories
+        int num_bboxes = (total_categories + max_classes_per_box - 1) / max_classes_per_box;
+        
+        header = av_clip_bbox_create_side_data(frame, num_bboxes);
+        if (!header) {
+            av_log(filter_ctx, AV_LOG_ERROR, "Failed to allocate side data for clip classification\n");
+            return AVERROR(ENOMEM);
+        }
+    } else {
+        header = (AVClipBBoxHeader *)sd->data;
+    }
+
+    if (bbox_index == 0) {
+        av_strlcat(header->source, ", ", sizeof(header->source));
+        av_strlcat(header->source, ctx->dnnctx.model_filename, sizeof(header->source));
+    }
+
+    // Track the current bbox and class count within the current bbox
+    int current_bbox_idx = 0;
+    int current_class_count = 0;
+    bbox = av_get_clip_bbox(header, current_bbox_idx);
+    if (!bbox) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to get initial bbox\n");
+        return AVERROR(EINVAL);
+    }
+    bbox->classify_count = 0;
+
+    for(int c = 0; c < ctx->num_contexts; c++) {
+        ClassifyContext *current_ctx = ctx->classifcation_ctx[c];
+        if (!current_ctx) {
+            av_log(filter_ctx, AV_LOG_ERROR, "Missing classification data at context %d\n", c);
+            continue;
+        }
+        ClassifyCategory *best_category;
+        float best_probability = -1.0f;
+        int prob_offset = 0;
+        // Calculate total probability for each category
+        for (int cat_idx = 0; cat_idx < current_ctx->category_count; cat_idx++) {
+            ClassifyCategory *category = &current_ctx->categories[cat_idx];
+
+            // Apply softmax only to the labels within this category
+            if (softmax(probabilities + prob_offset, 
+                current_ctx->label_count,
+                ctx->logit_scale, 
+                ctx->temperature,
+                filter_ctx) < 0) {
+                return AVERROR(EINVAL);
+            }
+
+            // Sum probabilities for all labels in this category
+            category->total_probability = 0.0f;
+            for (int label_idx = 0; label_idx < category->label_count; label_idx++) {
+                av_log(filter_ctx, AV_LOG_INFO, "prob = %f\n", probabilities[prob_offset + label_idx]);
+                category->total_probability += probabilities[prob_offset + label_idx];
+            }
+            if(category->total_probability > best_probability) {
+                best_probability = category->total_probability;
+                best_category = category;
+            }
+            prob_offset += category->label_count;
+        }
+        
+        // Check if we need to move to a new bbox
+        if (current_class_count >= max_classes_per_box) {
+            current_bbox_idx++;
+            current_class_count = 0;
+            bbox = av_get_clip_bbox(header, current_bbox_idx);
+            if (!bbox) {
+                av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", current_bbox_idx);
+                return AVERROR(EINVAL);
+            }
+            bbox->classify_count = 0;
+        }
+
+        // Add category to current bbox
+        int percentage = (int)(best_category->total_probability * 10000);
+        bbox->classify_confidences[current_class_count] = av_make_q(percentage, 10000);
+        av_strlcpy(bbox->classify_labels[current_class_count],
+                    best_category->name,
+                    AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE);
+        
+        bbox->classify_count++;
+        current_class_count++;
+    }
+
+    return ret;
+}
+
+static int dnn_clip_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
+{
+    DNNCLIPContext *ctx = filter_ctx->priv;
+
+    if (!frame || !output || !output->data) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Invalid input to post processing\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (ctx->label_ctx) {
+        return dnn_clip_post_proc_lables(frame, output, bbox_index, filter_ctx);
+    }
+    if (ctx->classifcation_ctx) {
+        return dnn_clip_post_proc_categories(frame, output, bbox_index, filter_ctx);
+    }
+    av_log(filter_ctx, AV_LOG_ERROR, "No valid classification context available\n");
+    return AVERROR(EINVAL);
+}
+
+static void free_label_context(ClassifyLabelContext *label_ctx)
+{
+    if (!label_ctx)
+        return;
+
+    if (label_ctx->labels) {
+        for (int i = 0; i < label_ctx->label_count; i++) {
+            av_freep(&label_ctx->labels[i]);
+        }
+        av_freep(&label_ctx->labels);
+    }
+    label_ctx->label_count = 0;
+}
+
+static void free_category(ClassifyCategory *category) 
+{
+    if (!category)
+        return;
+
+    av_freep(&category->name);
+    if (category->labels) {
+        free_label_context(category->labels);
+        av_freep(&category->labels);
+    }
+}
+
+static void free_classification_context(ClassifyContext *ctx) {
+    if (!ctx)
+        return;
+
+    if (ctx->categories) {
+        for (int i = 0; i < ctx->category_count; i++) {
+            free_category(&ctx->categories[i]);
+        }
+        av_freep(&ctx->categories);
+    }
+    av_freep(&ctx->name);
+    ctx->category_count = 0;
+    ctx->max_categories = 0;
+}
+
+static void free_clip_contexts(DNNCLIPContext *ctx) {
+    if (ctx->label_ctx) {
+        free_label_context(ctx->label_ctx);
+        av_freep(&ctx->label_ctx);
+    }
+
+    if (ctx->classifcation_ctx)
+    {
+        for (int i = 0; i < ctx->num_contexts; i++) {
+            if (ctx->classifcation_ctx[i]) {
+                free_classification_context(ctx->classifcation_ctx[i]);
+                av_freep(&ctx->classifcation_ctx[i]);
+            }
+        }
+        av_freep(&ctx->classifcation_ctx);
+    }
+    ctx->num_contexts = 0;
+    ctx->max_contexts = 0;
 }
 
 static int read_classify_label_file(AVFilterContext *context)
@@ -141,6 +439,11 @@ static int read_classify_label_file(AVFilterContext *context)
     int line_len;
     FILE *file;
     DNNCLIPContext *ctx = context->priv;
+
+    // Initialize the label context
+    ctx->label_ctx = av_calloc(1, sizeof(ClassifyLabelContext));
+    ctx->label_ctx->labels = NULL;
+    ctx->label_ctx->label_count = 0;
 
     file = avpriv_fopen_utf8(ctx->labels_filename, "r");
     if (!file) {
@@ -180,7 +483,7 @@ static int read_classify_label_file(AVFilterContext *context)
             return AVERROR(ENOMEM);
         }
 
-        if (av_dynarray_add_nofree(&ctx->labels, &ctx->label_count, prompt) < 0) {
+        if (av_dynarray_add_nofree(&ctx->label_ctx->labels, &ctx->label_ctx->label_count, prompt) < 0) {
             av_log(context, AV_LOG_ERROR, "Failed to add prompt to array\n");
             fclose(file);
             av_freep(&prompt);
@@ -190,6 +493,228 @@ static int read_classify_label_file(AVFilterContext *context)
 
     fclose(file);
     return 0;
+}
+
+static int read_categories_file(AVFilterContext *context)
+{
+    DNNCLIPContext *ctx = context->priv;
+    FILE *file;
+    char buf[256];
+    int ret = 0;
+    ClassifyContext *current_ctx = NULL;
+    ClassifyCategory *current_category = NULL;
+
+    file = avpriv_fopen_utf8(ctx->categories_filename, "r");
+    if (!file)
+    {
+        av_log(context, AV_LOG_ERROR, "Failed to open categories file %s\n", ctx->categories_filename);
+        return AVERROR(EINVAL);
+    }
+
+    // Initialize contexts array
+    ctx->max_contexts = 10; // Initial size
+    ctx->num_contexts = 0;
+    ctx->classifcation_ctx = av_calloc(ctx->max_contexts, sizeof(ClassifyContext *));
+    if (!ctx->classifcation_ctx)
+    {
+        fclose(file);
+        return AVERROR(ENOMEM);
+    }
+
+    while (fgets(buf, sizeof(buf), file))
+    {
+        char *line = buf;
+        int line_len = strlen(line);
+
+        // Trim whitespace and newlines
+        while (line_len > 0 && (line[line_len - 1] == '\n' ||
+                                line[line_len - 1] == '\r' ||
+                                line[line_len - 1] == ' '))
+        {
+            line[--line_len] = '\0';
+        }
+
+        if (line_len == 0)
+            continue;
+
+        // Check for context marker [ContextName]
+        if (line[0] == '[' && line[line_len - 1] == ']')
+        {
+            if (current_ctx != NULL)
+            {
+                // Store the previous context
+                if (ctx->num_contexts >= ctx->max_contexts)
+                {
+                    int new_size = ctx->max_contexts * 2;
+                    ClassifyContext **new_contexts = av_realloc_array(
+                        ctx->classifcation_ctx,
+                        new_size,
+                        sizeof(ClassifyContext *));
+                    if (!new_contexts)
+                    {
+                        ret = AVERROR(ENOMEM);
+                        goto end;
+                    }
+                    ctx->classifcation_ctx = new_contexts;
+                    ctx->max_contexts = new_size;
+                }
+                ctx->classifcation_ctx[ctx->num_contexts++] = current_ctx;
+            }
+
+            // Create new classification context
+            current_ctx = av_calloc(1, sizeof(ClassifyContext));
+            if (!current_ctx)
+            {
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+
+            // Extract context name
+            line[line_len - 1] = '\0';
+            current_ctx->max_categories = 10; // Default max categories
+            current_ctx->name = av_strdup(line + 1);
+            if (!current_ctx->name)
+            {
+                av_freep(&current_ctx);
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+
+            current_ctx->category_count = 0;
+            current_ctx->categories = av_calloc(current_ctx->max_categories, sizeof(ClassifyCategory));
+            if (!current_ctx->categories)
+            {
+                av_freep(&current_ctx->name);
+                av_freep(&current_ctx);
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+
+            current_category = NULL;
+        }
+        // Check for category marker (CategoryName)
+        else if (line[0] == '(' && line[line_len - 1] == ')')
+        {
+            if (!current_ctx)
+            {
+                av_log(context, AV_LOG_ERROR, "Category found without context\n");
+                ret = AVERROR(EINVAL);
+                goto end;
+            }
+
+            // Check if we need to resize categories array
+            if (current_ctx->category_count >= current_ctx->max_categories)
+            {
+                int new_size = current_ctx->max_categories * 2;
+                ClassifyCategory *new_categories = av_realloc_array(current_ctx->categories,
+                                                                          new_size, sizeof(ClassifyCategory));
+                if (!new_categories)
+                {
+                    ret = AVERROR(ENOMEM);
+                    goto end;
+                }
+                current_ctx->categories = new_categories;
+                current_ctx->max_categories = new_size;
+            }
+
+            // Extract category name
+            line[line_len - 1] = '\0';
+            current_category = &current_ctx->categories[current_ctx->category_count++];
+            ctx->total_categories++;
+            current_category->label_count = 0;
+            memset(current_category, 0, sizeof(ClassifyCategory));
+
+            current_category->name = av_strdup(line + 1);
+            if (!current_category->name)
+            {
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+
+            current_category->labels = av_calloc(1, sizeof(ClassifyLabelContext));
+            if (!current_category->labels)
+            {
+                av_freep(&current_category->name);
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+            current_category->total_probability = 0.0f;
+        }
+        // Must be a label
+        else if (line[0] != '\0' && current_category)
+        {
+            char *label = av_strdup(line);
+            if (!label)
+            {
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+
+            char **new_labels = av_realloc_array(current_category->labels->labels,
+                                                 current_category->labels->label_count + 1,
+                                                 sizeof(char *));
+            if (!new_labels)
+            {
+                av_freep(&label);
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+
+            current_category->labels->labels = new_labels;
+            current_category->label_count++;
+            current_category->labels->labels[current_category->labels->label_count++] = label;
+            current_ctx->label_count++;
+            ctx->total_labels++;
+        }
+    }
+
+    // Store the last context if it exists
+    if (current_ctx)
+    {
+        if (ctx->num_contexts >= ctx->max_contexts)
+        {
+            int new_size = ctx->max_contexts * 2;
+            ClassifyContext **new_contexts = av_realloc_array(
+                ctx->classifcation_ctx,
+                new_size,
+                sizeof(ClassifyContext *));
+            if (!new_contexts)
+            {
+                ret = AVERROR(ENOMEM);
+                goto end;
+            }
+            ctx->classifcation_ctx = new_contexts;
+            ctx->max_contexts = new_size;
+        }
+        ctx->classifcation_ctx[ctx->num_contexts++] = current_ctx;
+    }
+
+end:
+    if (ret < 0)
+    {
+        // Clean up current context if it wasn't added to the array
+        if (current_ctx)
+        {
+            free_classification_context(current_ctx);
+            av_freep(&current_ctx);
+        }
+
+        // Clean up all stored contexts
+        for (int i = 0; i < ctx->num_contexts; i++)
+        {
+            if (ctx->classifcation_ctx[i])
+            {
+                free_classification_context(ctx->classifcation_ctx[i]);
+                av_freep(&ctx->classifcation_ctx[i]);
+            }
+        }
+        av_freep(&ctx->classifcation_ctx);
+        ctx->num_contexts = 0;
+        ctx->max_contexts = 0;
+    }
+
+    fclose(file);
+    return ret;
 }
 
 static av_cold int dnn_clip_init(AVFilterContext *context)
@@ -202,22 +727,42 @@ static av_cold int dnn_clip_init(AVFilterContext *context)
         return ret;
     ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_clip_post_proc);
 
-    if (!ctx->labels_filename) {
-        av_log(context, AV_LOG_ERROR, "Text prompts file is required for CLIP classification\n");
+    if (ctx->labels_filename && ctx->categories_filename) {
+        av_log(context, AV_LOG_ERROR, "Labels and categories file cannot be used together\n");
         return AVERROR(EINVAL);
     }
+
+    if (ctx->labels_filename) {
+        ret = read_classify_label_file(context);
+        if (ret < 0) {
+            av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
+            return ret;
+        }
+    }
+    else if (ctx->categories_filename) {
+        ret = read_categories_file(context);
+        if (ret < 0) {
+            av_log(context, AV_LOG_ERROR, "Failed to read categories file\n");
+            return ret;
+        }
+    }
+    else {
+        av_log(context, AV_LOG_ERROR, "Labels or categories file is required for CLIP classification\n");
+        return AVERROR(EINVAL);
+    }
+
     if (!ctx->tokenizer_path) {
         av_log(context, AV_LOG_ERROR, "Tokenizer file is required for CLIP classification\n");
         return AVERROR(EINVAL);
     }
-    return read_classify_label_file(context);
+    return 0;
 }
 
 static av_cold void dnn_clip_uninit(AVFilterContext *context)
 {
     DNNCLIPContext *ctx = context->priv;
     ff_dnn_uninit(&ctx->dnnctx);
-    free_classify_labels(ctx);
+    free_clip_contexts(ctx);
 }
 
 static int dnn_clip_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
@@ -248,6 +793,36 @@ static int dnn_clip_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out
     return 0;
 }
 
+static int execute_clip_model_for_all_categories(DNNCLIPContext *ctx, AVFrame *frame) {
+    char **combined_labels = NULL;
+    int combined_idx = 0;
+    int ret;
+
+    // Allocate array for all labels
+    combined_labels = av_calloc(ctx->total_labels, sizeof(char *));
+    if (!combined_labels) {
+        return AVERROR(ENOMEM);
+    }
+    for(int c = 0; c < ctx->num_contexts; c++) {
+        ClassifyContext *current_ctx = ctx->classifcation_ctx[c];
+        for (int i = 0; i < current_ctx->category_count; i++) {
+            ClassifyCategory *category = &current_ctx->categories[i];
+            for (int j = 0; j < category->labels->label_count; j++) {
+                combined_labels[combined_idx] = category->labels->labels[j];
+                combined_idx++;
+            }
+        }    
+    }
+    // Execute model with ALL labels combined
+    ret = ff_dnn_execute_model_clip(&ctx->dnnctx, frame, NULL,
+        combined_labels,
+        ctx->tokenizer_path,
+        ctx->total_labels);
+
+    av_freep(&combined_labels);
+    return ret;
+}
+
 static int dnn_clip_activate(AVFilterContext *filter_ctx)
 {
     AVFilterLink *inlink = filter_ctx->inputs[0];
@@ -266,9 +841,31 @@ static int dnn_clip_activate(AVFilterContext *filter_ctx)
         ret = ff_inlink_consume_frame(inlink, &in);
         if (ret < 0)
             return ret;
+
         if (ret > 0) {
-            if (ff_dnn_execute_model_clip(&ctx->dnnctx, in, NULL, ctx->labels, ctx->tokenizer_path, ctx->label_count) != 0) {
-                return AVERROR(EIO);
+            if (ctx->label_ctx) {
+                // Simple label context case
+                ret = ff_dnn_execute_model_clip(&ctx->dnnctx, in, NULL,
+                                                ctx->label_ctx->labels,
+                                                ctx->tokenizer_path,
+                                                ctx->label_ctx->label_count);
+                if (ret != 0) {
+                    av_frame_free(&in);
+                    return AVERROR(EIO);
+                }
+            } else if (ctx->classifcation_ctx){
+                // Process all classification context
+                ret = execute_clip_model_for_all_categories(ctx, in);
+                if (ret != 0)
+                {
+                    av_frame_free(&in);
+                    return ret;
+                }
+            } else {
+                av_log(filter_ctx, AV_LOG_ERROR,
+                       "No label context or classification contexts available\n");
+                av_frame_free(&in);
+                return AVERROR(EINVAL);
             }
         }
     } while (ret > 0);

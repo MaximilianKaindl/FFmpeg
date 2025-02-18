@@ -310,11 +310,9 @@ int set_params_clip(const THModel *th_model, const char **labels, const int& lab
     return 0;
 }
 
-static torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image_features, const torch::Tensor& text_embedding, const float& logit_scale, DnnContext *ctx, float temperature = 1.0) {
+static torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image_features, const torch::Tensor& text_embedding, DnnContext *ctx) {
     try {
-        auto similarity = torch::matmul(image_features, text_embedding.transpose(0,1));    
-        similarity = similarity * logit_scale;      
-        return similarity.div(temperature);
+        return torch::matmul(image_features, text_embedding.transpose(0,1));    
     } catch (const c10::Error& e) {
         av_log(ctx, AV_LOG_ERROR, "Similarity computation failed: %s\n", e.what());
         return {};
@@ -336,7 +334,7 @@ int process_clip_similarity(const THModel *th_model, const THRequestItem *reques
             if((*infer_request->text_embeddings)[i].device() != device) {
                 (*infer_request->text_embeddings)[i] = (*infer_request->text_embeddings)[i].to(device);
             }
-            auto similarity = calculate_clip_similarity_matrix(*infer_request->input_tensor, (*infer_request->text_embeddings)[i], th_model->clip_ctx->logit_scale, ctx);
+            auto similarity = calculate_clip_similarity_matrix(*infer_request->input_tensor, (*infer_request->text_embeddings)[i], ctx);
             auto similarity_value = similarity.item<float>();
             similarity_scores.push_back(similarity_value);
 
@@ -346,10 +344,8 @@ int process_clip_similarity(const THModel *th_model, const THRequestItem *reques
 
         // Convert scores to tensor and compute softmax
         auto scores_tensor = torch::tensor(similarity_scores);
-        auto softmax_scores = torch::softmax(scores_tensor, 0);
-
-        infer_request->output = new torch::Tensor(softmax_scores);
-
+        infer_request->output = new torch::Tensor(scores_tensor);
+        
         if (!infer_request->output->defined()) {
             av_log(ctx, AV_LOG_ERROR, "Failed to create output tensor\n");
             return AVERROR(EINVAL);
