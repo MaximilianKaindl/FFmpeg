@@ -28,11 +28,11 @@
 #include "dnn_filter_common.h"
 #include "video.h"
 #include "libavutil/time.h"
-#include "libavutil/clip_bbox.h"
+#include "libavutil/detection_bbox.h"
 #include "libavutil/avstring.h"
 
 typedef struct ClassProb {
-    char    label[AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE];
+    char    label[AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE];
     int64_t count;
     double  sum;
 } ClassProb;
@@ -82,9 +82,9 @@ static void write_averages_to_file(AVFilterContext *ctx)
     for (int i = 0; i < s->nb_classes; i++) {
         double avg = s->class_probs[i].count > 0 ?
                     s->class_probs[i].sum / s->class_probs[i].count : 0.0;
-        fprintf(f, "%s: %.4f\n", s->class_probs[i].label, avg);
-        av_log(ctx, AV_LOG_INFO, "Classification Label: %s: Average probability %.4f\n", 
-               s->class_probs[i].label, avg);
+        fprintf(f, "%s:%.4f:%ld\n",s->class_probs[i].label, avg,s->class_probs[i].count);
+        av_log(ctx, AV_LOG_INFO, "Classification Label: %s: Average probability %.4f, Appeared %ld times \n", 
+               s->class_probs[i].label, avg, s->class_probs[i].count);
     }
 
     fclose(f);
@@ -123,33 +123,33 @@ static int process_frame(AVFilterContext *ctx, AVFrame *frame)
 {
     AvgClassContext *s = ctx->priv;
     AVFrameSideData *sd;
-    const AVClipBBoxHeader *header;
-    const AVClipBBox *bbox;
+    const AVDetectionBBoxHeader *header;
+    const AVDetectionBBox *bbox;
     int i, j;
     double prob;
     ClassProb *class_prob;
 
     
-    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_CLIP_BBOXES);
-    if (!sd || sd->size < sizeof(AVClipBBoxHeader)) {
-        av_log(ctx, AV_LOG_ERROR, "Invalid clip bbox side data\n"); 
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
+    if (!sd || sd->size < sizeof(AVDetectionBBoxHeader)) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid bbox side data\n"); 
         return 0;
     }   
 
-    header = (const AVClipBBoxHeader *)sd->data;
+    header = (const AVDetectionBBoxHeader *)sd->data;
 
-    if (!header || sd->size < sizeof(AVClipBBoxHeader)) {
-        av_log(ctx, AV_LOG_ERROR, "Invalid clip bbox header\n");
+    if (!header || sd->size < sizeof(AVDetectionBBoxHeader)) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid bbox header\n");
         return 0;
     }
 
-    if (header->nb_bboxes <= 0 || header->nb_bboxes > AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE) {
+    if (header->nb_bboxes <= 0 || header->nb_bboxes > 10000) {
         av_log(ctx, AV_LOG_ERROR, "Invalid number or no bboxes\n");
         return 0;
     }
     
     for (i = 0; i < header->nb_bboxes; i++) {
-        bbox = av_get_clip_bbox(header, i);
+        bbox = av_get_detection_bbox(header, i);
         if (!bbox) {
             av_log(ctx, AV_LOG_ERROR, "Failed to get bbox at index %d\n", i);
             continue;
@@ -188,12 +188,6 @@ static int process_frame(AVFilterContext *ctx, AVFrame *frame)
                     continue;
                 }
                 av_log(ctx, AV_LOG_DEBUG, "Label: %s, Confidence: %.6f\n", bbox->classify_labels[j], prob);
-
-            }
-            if (prob < 0.0 || prob > 1.0) {
-                av_log(ctx, AV_LOG_WARNING, "Probability out of range [0,1] at bbox %d class %d: %f\n",
-                        i, j, prob);
-                continue;
             }
 
             class_prob = find_or_create_class(s, bbox->classify_labels[j]);
