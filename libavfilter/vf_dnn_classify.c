@@ -137,6 +137,14 @@
  
  AVFILTER_DNN_DEFINE_CLASS(dnn_classify, DNN_OV);
  
+
+static int dnn_classify_set_prob_and_label_of_bbox(AVDetectionBBox **bbox, char *label, int index, float probability){
+    (*bbox)->classify_confidences[index] = av_make_q((int)(probability * 10000), 10000);
+    av_strlcpy((*bbox)->classify_labels[index],
+                label,
+                AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+    return 0;
+} 
 static int dnn_classify_post_proc_standard(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
  {
      DnnClassifyContext *ctx = filter_ctx->priv;
@@ -235,76 +243,108 @@ static int dnn_classify_softmax(float *input, size_t input_len, float logit_scal
      return 0;
 }
 
+static AVDetectionBBoxHeader *dnn_classify_find_or_create_detection_bbox(AVFrame *frame, uint32_t *bbox_index, int *new, AVFilterContext *filter_ctx){
+    DnnClassifyContext *ctx = filter_ctx->priv;
+    AVFrameSideData *sd;
+    AVDetectionBBoxHeader *header;
+
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
+    if (!sd) {
+        header = av_detection_bbox_create_side_data(frame, 1);
+        if (!header) {
+            av_log(filter_ctx, AV_LOG_ERROR, "Cannot get side data in CLIP labels processing\n");
+            return AVERROR(EINVAL);
+        }
+        //ensure if created index is 0
+        *bbox_index = 0;
+        *new = 1;
+    }
+    else{
+        header = (AVDetectionBBoxHeader *)sd->data;
+    }
+
+    if (*bbox_index == 0) {
+        av_strlcat(header->source, ", ", sizeof(header->source));
+        av_strlcat(header->source, ctx->dnnctx.model_filename, sizeof(header->source));
+    }
+    return header;
+}
+
+static int dnn_classify_fill_bbox_with_best_labels(DnnClassifyContext *ctx, char **labels, float** probabilities, int num_labels, AVDetectionBBox *bbox, int max_classes_per_box, float confidence_threshold){
+    int i, j, minpos;
+    float min;
+
+    for (i = 0; i < num_labels; i++) {
+        if ((*probabilities)[i] >= confidence_threshold) {
+            if (bbox->classify_count >= max_classes_per_box) {
+                // Find the classification with lowest probability to potentially substitute
+                min = (*probabilities)[0];
+                minpos = 0;
+                for (j = 1; j < bbox->classify_count; j++) {
+                    if (av_q2d(bbox->classify_confidences[j]) < min) {
+                        min = av_q2d(bbox->classify_confidences[j]);
+                        minpos = j;
+                    }
+                }
+                
+                // If current probability is higher than the minimum, substitute it
+                if ((*probabilities)[i] > min) {
+                    dnn_classify_set_prob_and_label_of_bbox(&bbox, 
+                        ctx->label_classification_ctx->labels[i], minpos,
+                        (*probabilities)[i]);
+                    // Note: classify_count doesn't change as we're substituting
+                }
+            } else {
+                // Add new classification
+                dnn_classify_set_prob_and_label_of_bbox(&bbox, 
+                    ctx->label_classification_ctx->labels[i], i,
+                    (*probabilities)[i]);
+                bbox->classify_count++;
+            }
+        }
+    }
+    return 0;
+}
+
 static int dnn_classify_post_proc_clip_labels(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
     DnnClassifyContext *ctx = filter_ctx->priv;
     const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
-    int num_labels = ctx->label_classification_ctx->label_count;
     float *probabilities = (float *)output->data;
-    
-    int num_bboxes;
-    AVFrameSideData *sd;
+    int num_labels = ctx->label_classification_ctx->label_count;
     AVDetectionBBoxHeader *header;
     AVDetectionBBox *bbox;
-    int i, j;
-    int start_idx, end_idx;
-    int percentage;
+    float confidence_threshold = ctx->confidence;
+    int ret, new = 0;
 
     // Apply softmax to probabilities
     if (dnn_classify_softmax(probabilities, num_labels, ctx->logit_scale, ctx->temperature, filter_ctx) < 0) {
         return AVERROR(EINVAL);
     }
 
-    // Calculate number of bounding boxes needed
-    num_bboxes = (num_labels + max_classes_per_box - 1) / max_classes_per_box;
-
-    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-    if (!sd) {
-        header = av_detection_bbox_create_side_data(frame, num_bboxes);
-        if (!header) {
-            av_log(filter_ctx, AV_LOG_ERROR, "Cannot get side data in CLIP labels processing\n");
-            return AVERROR(EINVAL);
-        }
-    }
-    else{
-        header = (AVDetectionBBoxHeader *)sd->data;
+    // Get or create detection bbox header
+    header = dnn_classify_find_or_create_detection_bbox(frame, &bbox_index, &new, filter_ctx);
+    if (!header) {
+        return AVERROR(EINVAL);
     }
 
-    if (bbox_index == 0) {
-        av_strlcat(header->source, ", ", sizeof(header->source));
-        av_strlcat(header->source, ctx->dnnctx.model_filename, sizeof(header->source));
+    // Get bbox for current index
+    bbox = av_get_detection_bbox(header, bbox_index);
+    if (!bbox) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", bbox_index);
+        return AVERROR(EINVAL);
     }
 
-    // Process each bbox
-    for (i = 0; i < num_bboxes; i++) {
-        bbox = av_get_detection_bbox(header, i);
-        if (!bbox) {
-            av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", i);
-            return AVERROR(EINVAL);
-        }
-
-        // Initialize bbox
+    // Initialize classify count if newly created
+    if(new == 1){
         bbox->classify_count = 0;
-
-        start_idx = i * max_classes_per_box;
-        end_idx = FFMIN(num_labels, (i + 1) * max_classes_per_box);
-
-        // Set classifications for this bbox
-        for (j = start_idx; j < end_idx && bbox->classify_count < max_classes_per_box; j++) {
-            if (!ctx->label_classification_ctx->labels[j]) {
-                av_log(filter_ctx, AV_LOG_ERROR, "Invalid label at index %d\n", j);
-                continue;
-            }
-
-            percentage = (int)(probabilities[j] * 10000);
-            bbox->classify_confidences[bbox->classify_count] = av_make_q(percentage, 10000);
-            av_strlcpy(bbox->classify_labels[bbox->classify_count],
-                      ctx->label_classification_ctx->labels[j],
-                      AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
-            bbox->classify_count++;
-        }
     }
 
+    ret = dnn_classify_fill_bbox_with_best_labels(ctx, ctx->label_classification_ctx->labels, &probabilities, num_labels, bbox, max_classes_per_box, confidence_threshold);
+    if(ret < 0){
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to fill bbox with best labels\n");
+        return ret;
+    }
     return 0;
 }
 
@@ -331,7 +371,7 @@ static int dnn_classify_apply_softmax_over_all_categories(DnnClassifyContext *ct
     return 0;
 }
 
-static CategoriesContext *dnn_classify_get_best_category(CategoriesContext *categories_ctx, float* probabilities){
+static CategoryContext *dnn_classify_get_best_category(CategoriesContext *categories_ctx, float** probabilities){
     CategoryContext *best_category;
     float best_probability = -1.0f;
     int prob_offset = 0;
@@ -341,7 +381,7 @@ static CategoriesContext *dnn_classify_get_best_category(CategoriesContext *cate
         // Sum probabilities for all labels in this category
         category->total_probability = 0.0f;
         for (int label_idx = 0; label_idx < category->label_count; label_idx++) {
-            category->total_probability += probabilities[prob_offset + label_idx];
+            category->total_probability += (*probabilities)[prob_offset + label_idx];
         }
         if(category->total_probability > best_probability) {
             best_probability = category->total_probability;
@@ -355,87 +395,83 @@ static CategoriesContext *dnn_classify_get_best_category(CategoriesContext *cate
 static int dnn_classify_post_proc_clip_categories(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
     DnnClassifyContext *ctx = filter_ctx->priv;
-    float *probabilities = output->data;
-    AVFrameSideData *sd;
+    CategoryClassifcationContext *cat_class_ctx;
     AVDetectionBBoxHeader *header;
     AVDetectionBBox *bbox;
-    int ret = 0;
-    int current_bbox_idx = 0;
-    int current_class_count = 0;
-    int num_bboxes = 0;
+    CategoryContext *best_category;
+    float *probabilities;
+    int ret, new = 0, prob_offset = 0;
+    char *ctx_labels;
+    float *ctx_probabilities;
 
-    CategoryClassifcationContext *cat_class_ctx = ctx->category_classification_ctx;
-    const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
-
-    dnn_classify_apply_softmax_over_all_categories(ctx, filter_ctx, probabilities);
-    
-    // Calculate number of bounding boxes needed
-    num_bboxes = (cat_class_ctx->total_categories + max_classes_per_box - 1) / max_classes_per_box;
-    
-    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-    if (!sd) {
-        header = av_detection_bbox_create_side_data(frame, num_bboxes);
-        if (!header) {
-            av_log(filter_ctx, AV_LOG_ERROR, "Cannot get side data in CLIP labels processing\n");
-            return AVERROR(EINVAL);
-        }
-    }
-    else{
-        header = (AVDetectionBBoxHeader *)sd->data;
-    }
-
-    if (bbox_index == 0) {
-        av_strlcat(header->source, ", ", sizeof(header->source));
-        av_strlcat(header->source, ctx->dnnctx.model_filename, sizeof(header->source));
-    }
-
-    // Track the current bbox and class count within the current bbox
-    bbox = av_get_detection_bbox(header, current_bbox_idx);
-    if (!bbox) {
-        av_log(filter_ctx, AV_LOG_ERROR, "Failed to get initial bbox\n");
+    // Input validation
+    if (!frame || !output || !output->data || !ctx->category_classification_ctx) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Invalid input to CLIP categories post-processing\n");
         return AVERROR(EINVAL);
     }
-    bbox->classify_count = 0;
 
+    cat_class_ctx = ctx->category_classification_ctx;
+    probabilities = output->data;
 
-    for(int c = 0; c < cat_class_ctx->num_contexts; c++) {
-        CategoriesContext *categories_ctx = cat_class_ctx->category_units[c];
+    // Apply softmax transformation to probabilities
+    ret = dnn_classify_apply_softmax_over_all_categories(ctx, filter_ctx, probabilities);
+    if (ret < 0) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to apply softmax transformation\n");
+        return ret;
+    }
+
+    // Get or create detection bbox header
+    header = dnn_classify_find_or_create_detection_bbox(frame, &bbox_index, &new, filter_ctx);
+    if (!header) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to get or create detection bbox header\n");
+        return AVERROR(EINVAL);
+    }
+
+    // Get bbox for current index
+    bbox = av_get_detection_bbox(header, bbox_index);
+    if (!bbox) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox at index %d\n", bbox_index);
+        return AVERROR(EINVAL);
+    }
+
+    // Initialize classify count if newly created
+    if(new == 1){
+        bbox->classify_count = 0;
+    }
+
+    // Get each best Category of each context
+    ctx_labels = (char *)av_mallocz(cat_class_ctx->num_contexts * sizeof(char));
+    ctx_probabilities = (float *)av_mallocz(cat_class_ctx->num_contexts * sizeof(float));
+
+    for (int ctx_idx = 0; ctx_idx < cat_class_ctx->num_contexts; ctx_idx++) {
+        CategoriesContext *categories_ctx = cat_class_ctx->category_units[ctx_idx];
         if (!categories_ctx) {
-            av_log(filter_ctx, AV_LOG_ERROR, "Missing classification data at context %d\n", c);
+            av_log(filter_ctx, AV_LOG_ERROR, "Missing classification data at context %d\n", ctx_idx);
             continue;
         }
 
-        CategoryContext *best_category = dnn_classify_get_best_category(categories_ctx, probabilities);
-        
-        if(!best_category){
-            av_log(filter_ctx, AV_LOG_ERROR, "Failed to get best category\n");
+        // Find best category within this context
+        best_category = dnn_classify_get_best_category(categories_ctx, 
+                                                                      (&ctx_probabilities + prob_offset));
+        if (!best_category) {
+            av_log(filter_ctx, AV_LOG_ERROR, "Failed to determine best category for context %d\n", ctx_idx);
             return AVERROR(EINVAL);
         }
-
-        // Check if we need to move to a new bbox
-        if (current_class_count >= max_classes_per_box) {
-            current_bbox_idx++;
-            current_class_count = 0;
-            bbox = av_get_detection_bbox(header, current_bbox_idx);
-            if (!bbox) {
-                av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", current_bbox_idx);
-                return AVERROR(EINVAL);
-            }
-            bbox->classify_count = 0;
-        }
-
-        // Add category to current bbox
-        int percentage = (int)(best_category->total_probability * 10000);
-        bbox->classify_confidences[current_class_count] = av_make_q(percentage, 10000);
-        av_strlcpy(bbox->classify_labels[current_class_count],
-                    best_category->name,
-                    AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
-        
-        bbox->classify_count++;
-        current_class_count++;
+        ctx_labels[ctx_idx] = *best_category->name;
+        ctx_probabilities[ctx_idx] = best_category->total_probability;
+        // Update probability offset for next context
+        prob_offset += categories_ctx->label_count;
     }
+    ret = dnn_classify_fill_bbox_with_best_labels(ctx, &ctx_labels, &ctx_probabilities, cat_class_ctx->num_contexts, bbox, AV_NUM_DETECTION_BBOX_CLASSIFY, ctx->confidence); 
+    if (ret < 0) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to fill bbox with best labels\n");
+        return ret;
+    }   
 
-    return ret;
+    av_freep(&ctx_labels);
+    av_freep(&ctx_probabilities);
+
+    return 0;
 }
  
  static int dnn_classify_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
@@ -472,57 +508,73 @@ static int dnn_classify_post_proc_clip_categories(AVFrame *frame, DNNData *outpu
          av_freep(&label_classification_ctx->labels);
      }
      label_classification_ctx->label_count = 0;
+     av_freep(label_classification_ctx);
  }
  
  static void free_category_context(CategoryContext *category)
- {
-     if (!category)
-         return;
- 
-     av_freep(&category->name);
-     if (category->labels) {
-        free_label_context(category->labels);
-         av_freep(&category->labels);
-     }
- }
- 
- static void free_clip_categories_context(CategoriesContext *ctx)
- {
-     if (!ctx)
-         return;
- 
-     if (ctx->categories) {
-         for (int i = 0; i < ctx->category_count; i++) {
-             free_category_context(&ctx->categories[i]);
-         }
-         av_freep(&ctx->categories);
-     }
-     av_freep(&ctx->name);
-     ctx->category_count = 0;
-     ctx->max_categories = 0;
- }
- 
- static void free_contexts(DnnClassifyContext *ctx)
- {
-     if (ctx->label_classification_ctx) {
-        free_label_context(ctx->label_classification_ctx);
-         av_freep(&ctx->label_classification_ctx);
-     }
- 
-     if (ctx->category_classification_ctx) {
-        CategoryClassifcationContext *category_classification_ctx = ctx->category_classification_ctx;
-         for (int i = 0; i < category_classification_ctx->num_contexts; i++) {
-             if (category_classification_ctx->category_units[i]) {
-                 free_clip_categories_context(category_classification_ctx->category_units[i]);
-                 av_freep(&category_classification_ctx->category_units[i]);
-             }
-         }
-         av_freep(category_classification_ctx->category_units);
+{
+    if (!category)
+        return;
 
-         category_classification_ctx->num_contexts = 0;
-         category_classification_ctx->max_contexts = 0;
-         av_freep(category_classification_ctx);
-     }
+    if (category->name) {
+        av_freep(&category->name);
+    }
+    
+    if (category->labels) {
+        free_label_context(category->labels);
+        category->labels = NULL;  
+    }
+}
+
+static void free_categories_context(CategoriesContext *ctx)
+{
+    if (!ctx)
+        return;
+
+    if (ctx->categories) {
+        for (int i = 0; i < ctx->category_count; i++) {
+            free_category_context(&ctx->categories[i]);
+        }
+        // Now free the array of categories
+        av_freep(&ctx->categories);
+    }
+    
+    if (ctx->name) {
+        av_freep(&ctx->name);
+    }
+    
+    ctx->category_count = 0;
+    ctx->max_categories = 0;
+    ctx->label_count = 0;
+}
+
+static void free_contexts(DnnClassifyContext *ctx)
+{
+    if (!ctx)
+        return;
+
+    if (ctx->label_classification_ctx) {
+        free_label_context(ctx->label_classification_ctx);
+        ctx->label_classification_ctx = NULL;
+    }
+
+    if (ctx->category_classification_ctx) {
+        CategoryClassifcationContext *category_classification_ctx = ctx->category_classification_ctx;
+        if (category_classification_ctx) {
+            if (category_classification_ctx->category_units) {
+                for (int i = 0; i < category_classification_ctx->num_contexts; i++) {
+                    if (category_classification_ctx->category_units[i]) {
+                        free_categories_context(category_classification_ctx->category_units[i]);
+                        av_freep(&category_classification_ctx->category_units[i]);
+                    }
+                }
+                av_freep(&category_classification_ctx->category_units);
+            }
+            category_classification_ctx->num_contexts = 0;
+            category_classification_ctx->max_contexts = 0;
+            av_freep(&ctx->category_classification_ctx);
+        }
+    }
 }
 
 static int read_classify_label_file(AVFilterContext *context)
@@ -591,13 +643,13 @@ static int read_categories_file(AVFilterContext *context)
     int ret = 0;
     CategoriesContext *current_ctx = NULL;
     CategoryContext *current_category = NULL;
+    CategoryClassifcationContext *cat_class_ctx = ctx->category_classification_ctx;
 
     file = avpriv_fopen_utf8(ctx->categories_filename, "r");
     if (!file) {
         av_log(context, AV_LOG_ERROR, "Failed to open categories file %s\n", ctx->categories_filename);
         return AVERROR(EINVAL);
     }
-    CategoryClassifcationContext *cat_class_ctx = ctx->category_classification_ctx;
 
     // Initialize contexts array
     cat_class_ctx->max_contexts = 10;
@@ -623,7 +675,7 @@ static int read_categories_file(AVFilterContext *context)
             continue;
 
         if (line_len >= AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) {
-            av_log(context, AV_LOG_ERROR, "label %s too long\n", buf);
+            av_log(context, AV_LOG_ERROR, "Label %s too long\n", buf);
             ret = AVERROR(ENOMEM);
             goto end;
         }
@@ -763,23 +815,10 @@ end:
         // Clean up current context if it wasn't added to the array
         if (current_ctx)
         {
-            free_clip_categories_context(current_ctx);
-            av_freep(&current_ctx);
+            free_categories_context(current_ctx);
         }
 
-        // Clean up all stored contexts
-        for (int i = 0; i < cat_class_ctx->num_contexts; i++)
-        {
-            if (cat_class_ctx->category_units[i])
-            {
-                free_clip_categories_context(cat_class_ctx->category_units[i]);
-                av_freep(&cat_class_ctx->category_units[i]);
-            }
-        }
-        av_freep(&cat_class_ctx->category_units);
-        cat_class_ctx->num_contexts = 0;
-        cat_class_ctx->max_contexts = 0;
-        av_freep(&cat_class_ctx);
+        free_contexts(ctx);
     }
 
     fclose(file);
