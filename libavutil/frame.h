@@ -194,13 +194,6 @@ enum AVFrameSideDataType {
     AV_FRAME_DATA_DETECTION_BBOXES,
 
     /**
-     * Bounding boxes for clip image classification,
-     * as described by AVClipBBoxHeader.
-     */
-    AV_FRAME_DATA_CLIP_BBOXES,
-
-
-    /**
      * Dolby Vision RPU raw data, suitable for passing to x265
      * or other libraries. Array of uint8_t, with NAL emulation
      * bytes intact.

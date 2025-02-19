@@ -30,7 +30,6 @@
  #include "libavutil/time.h"
  #include "libavutil/avstring.h"
  #include "libavutil/detection_bbox.h"
- #include "libavutil/clip_bbox.h"
  
 /*
     Labels that are being used to classify the image
@@ -430,7 +429,7 @@ static int dnn_classify_post_proc_clip_categories(AVFrame *frame, DNNData *outpu
         bbox->classify_confidences[current_class_count] = av_make_q(percentage, 10000);
         av_strlcpy(bbox->classify_labels[current_class_count],
                     best_category->name,
-                    AV_CLIP_BBOX_LABEL_NAME_MAX_SIZE);
+                    AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
         
         bbox->classify_count++;
         current_class_count++;
