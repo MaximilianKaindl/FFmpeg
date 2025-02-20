@@ -56,6 +56,7 @@ done
 ./configure \
     --enable-debug \
     --enable-libtorch \
+    --enable-libtorch_cuda \
     --enable-libtokenizers \
     --enable-cuda-nvcc \
     --enable-libnpp \

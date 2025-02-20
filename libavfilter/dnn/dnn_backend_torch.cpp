@@ -538,6 +538,7 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
             goto fail;
         }
         at::detail::getXPUHooks().init();
+    #if (CONFIG_LIBTORCH_CUDA == 1)
     } else if (device.is_cuda()) {
         if (!torch::cuda::is_available()) {
             av_log(ctx, AV_LOG_ERROR, "CUDA is not available!\n");
@@ -568,6 +569,7 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
             av_log(ctx, AV_LOG_ERROR, "CUDA initialization failed: %s\n", e.what());
             goto fail;
         }
+    #endif
     } else if (!device.is_cpu()) {
         av_log(ctx, AV_LOG_ERROR, "Not supported device:\"%s\"\n", device_name);
         goto fail;

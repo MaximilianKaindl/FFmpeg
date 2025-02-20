@@ -285,6 +285,7 @@ External library support:
   --enable-libtls          enable LibreSSL (via libtls), needed for https support
                            if openssl, gnutls or mbedtls is not used [no]
   --enable-libtorch        enable Torch as one DNN backend [no]
+  --enable-libtorch_cuda   enable Torch as one DNN backend with CUDA [no]
   --enable-libtokenizers   enable tokenizers-cpp library [no]
   --enable-libtwolame      enable MP2 encoding via libtwolame [no]
   --enable-libuavs3d       enable AVS3 decoding via libuavs3d [no]
@@ -1968,6 +1969,7 @@ EXTERNAL_LIBRARY_LIST="
     libtesseract
     libtheora
     libtorch
+    libtorch_cuda
     libtokenizers
     libtwolame
     libuavs3d
@@ -2873,7 +2875,7 @@ dirac_parse_select="golomb"
 dovi_rpudec_select="golomb"
 dovi_rpuenc_select="golomb"
 dnn_deps="avformat swscale"
-dnn_deps_any="libtensorflow libopenvino libtorch libtokenizers"
+dnn_deps_any="libtensorflow libopenvino libtorch libtorch_cuda libtokenizers"
 error_resilience_select="me_cmp"
 evcparse_select="golomb"
 faandct_deps="faan"
@@ -7046,6 +7048,7 @@ enabled libtesseract      && require_pkg_config libtesseract tesseract tesseract
 enabled libtheora         && require libtheora theora/theoraenc.h th_info_init -ltheoraenc -ltheoradec -logg
 enabled libtls            && require_pkg_config libtls libtls tls.h tls_configure
 enabled libtorch          && check_cxxflags -std=c++17 && require_cpp libtorch torch/torch.h "torch::Tensor" -ltorch -lc10 -ltorch_cpu -lstdc++ -lpthread
+enabled libtorch_cuda     && check_cxxflags -std=c++17
 enabled libtokenizers     && check_cxxflags -std=c++17 && require_cpp libtokenizers "tokenizers_cpp.h tokenizers_c.h" "" -ltokenizers_cpp -ltokenizers_c -lstdc++
 enabled libtwolame        && require libtwolame twolame.h twolame_init -ltwolame &&
                              { check_lib libtwolame twolame.h twolame_encode_buffer_float32_interleaved -ltwolame ||

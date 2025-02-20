@@ -18,11 +18,6 @@
 #ifndef AVFILTER_DNN_DNN_BACKEND_TORCH_COMMON_H
 #define AVFILTER_DNN_DNN_BACKEND_TORCH_COMMON_H
 
-#include <torch/script.h>
-#include <torch/torch.h>
-#include <c10/cuda/CUDAStream.h>
-#include <ATen/cuda/CUDAContext.h>
-
 struct THClipContext;
 
 extern "C" {
@@ -36,6 +31,15 @@ extern "C" {
 #include "libavutil/detection_bbox.h"
 #include "libavutil/avstring.h"
 }
+
+#include <torch/script.h>
+#include <torch/torch.h>
+
+#if (CONFIG_LIBTORCH_CUDA == 1)
+#include <c10/cuda/CUDAStream.h>
+#include <ATen/cuda/CUDAContext.h>
+#endif
+
 
 typedef struct THModel {
     DNNModel model;
