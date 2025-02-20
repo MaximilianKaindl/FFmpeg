@@ -48,6 +48,7 @@ static int extract_lltask_from_task(TaskItem *task, Queue *lltask_queue)
     task->inference_todo = 1;
     task->inference_done = 0;
     lltask->task = task;
+    lltask->bbox_index = 0;
     if (ff_queue_push_back(lltask_queue, lltask) < 0) {
         av_log(ctx, AV_LOG_ERROR, "Failed to push back lltask_queue.\n");
         av_freep(&lltask);
