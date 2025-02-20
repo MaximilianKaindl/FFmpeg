@@ -95,6 +95,7 @@ typedef struct DNNExecZeroShotClassificationParams {
     DNNExecBaseParams base;
     const char **labels;
     const int label_count;
+    const char *target;
     const char *tokenizer_path;
 } DNNExecZeroShotClassificationParams;
 

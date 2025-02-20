@@ -36,25 +36,94 @@ static const AVOption dnn_th_options[] = {
     { NULL }
 };
 
-static int extract_lltask_from_task(TaskItem *task, Queue *lltask_queue)
+static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Queue *lltask_queue, DNNExecBaseParams *exec_params)
 {
     THModel *th_model = (THModel *)task->model;
     DnnContext *ctx = th_model->ctx;
-    LastLevelTaskItem *lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
-    if (!lltask) {
-        av_log(ctx, AV_LOG_ERROR, "Failed to allocate memory for LastLevelTaskItem\n");
-        return AVERROR(ENOMEM);
+
+    switch(func_type){
+    case DFT_PROCESS_FRAME:
+    {
+        LastLevelTaskItem *lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
+        if (!lltask) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to allocate memory for LastLevelTaskItem\n");
+            return AVERROR(ENOMEM);
+        }
+        task->inference_todo = 1;
+        task->inference_done = 0;
+        lltask->task = task;
+        if (ff_queue_push_back(lltask_queue, lltask) < 0) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to push back lltask_queue.\n");
+            av_freep(&lltask);
+            return AVERROR(ENOMEM);
+        }
+        return 0;
     }
-    task->inference_todo = 1;
-    task->inference_done = 0;
-    lltask->task = task;
-    lltask->bbox_index = 0;
-    if (ff_queue_push_back(lltask_queue, lltask) < 0) {
-        av_log(ctx, AV_LOG_ERROR, "Failed to push back lltask_queue.\n");
-        av_freep(&lltask);
-        return AVERROR(ENOMEM);
+    case DFT_ANALYTICS_CLIP:
+    {
+        const AVDetectionBBoxHeader *header;
+        AVFrame *frame = task->in_frame;
+        AVFrameSideData *sd;
+        LastLevelTaskItem *lltask;
+        DNNExecZeroShotClassificationParams *params = (DNNExecZeroShotClassificationParams *)exec_params;
+
+        if(params->target == NULL){
+            LastLevelTaskItem *lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
+            if (!lltask) {
+                av_log(ctx, AV_LOG_ERROR, "Failed to allocate memory for LastLevelTaskItem\n");
+                return AVERROR(ENOMEM);
+            }
+            task->inference_todo = 1;
+            task->inference_done = 0;
+            lltask->bbox_index = 0;
+            lltask->task = task;
+            if (ff_queue_push_back(lltask_queue, lltask) < 0) {
+                av_log(ctx, AV_LOG_ERROR, "Failed to push back lltask_queue.\n");
+                av_freep(&lltask);
+                return AVERROR(ENOMEM);
+            }
+            return 0;
+        }
+
+        task->inference_todo = 0;
+        task->inference_done = 0;
+
+        if (!ff_dnn_contain_valid_detection_bbox(frame)) {
+            return 0;
+        }
+
+        sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
+        header = (const AVDetectionBBoxHeader *)sd->data;
+
+        for (uint32_t i = 0; i < header->nb_bboxes; i++) {
+            const AVDetectionBBox *bbox = av_get_detection_bbox(header, i);
+
+            if (params->target) {
+                if (av_strncasecmp(bbox->detect_label, params->target, sizeof(bbox->detect_label)) != 0) {
+                    continue;
+                }
+            }
+
+            lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
+            if (!lltask) {
+                return AVERROR(ENOMEM);
+            }
+            task->inference_todo++;
+            lltask->task = task;
+            lltask->bbox_index = i;
+            if (ff_queue_push_back(lltask_queue, lltask) < 0) {
+                av_freep(&lltask);
+                return AVERROR(ENOMEM);
+            }
+        }
+        return 0;
     }
-    return 0;
+    default:
+    {
+        av_assert0(!"should not reach here");
+        return AVERROR(EINVAL);
+    }
+    }
 }
 
 static void th_free_request(THInferRequest *request)
@@ -412,7 +481,7 @@ static int get_output_th(DNNModel *model, const char *input_name, int input_widt
         goto err;
     }
 
-    ret = extract_lltask_from_task(&task, th_model->lltask_queue);
+    ret = extract_lltask_from_task(th_model->model.func_type, &task, th_model->lltask_queue, NULL);
     if ( ret != 0) {
         av_log(ctx, AV_LOG_ERROR, "unable to extract last level task from task.\n");
         goto err;
@@ -603,7 +672,7 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
         return ret;
     }
 
-    ret = extract_lltask_from_task(task, th_model->lltask_queue);
+    ret = extract_lltask_from_task(model->func_type, task, th_model->lltask_queue, exec_params);
     if (ret != 0) {
         av_log(ctx, AV_LOG_ERROR, "unable to extract last level task from task.\n");
         return ret;

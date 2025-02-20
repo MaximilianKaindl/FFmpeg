@@ -157,4 +157,5 @@ DNNAsyncStatusType ff_dnn_get_result_common(Queue *task_queue, AVFrame **in, AVF
  */
 int ff_dnn_fill_gettingoutput_task(TaskItem *task, DNNExecBaseParams *exec_params, void *backend_model, int input_height, int input_width, void *ctx);
 
+int ff_dnn_contain_valid_detection_bbox(AVFrame *frame);
 #endif

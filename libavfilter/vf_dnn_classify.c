@@ -234,7 +234,7 @@ static AVDetectionBBox *find_or_create_detection_bbox(AVFrame *frame, uint32_t b
         av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", bbox_index);
         return AVERROR(EINVAL);
     }
-
+    
     return bbox;
 }
 
@@ -597,8 +597,10 @@ static int execute_clip_model_for_all_categories(DnnClassifyContext *ctx, AVFram
     // Execute model with ALL labels combined
     ret = ff_dnn_execute_model_clip(&ctx->dnnctx, frame, NULL,
         combined_labels,
+        cat_class_ctx->total_labels,
         ctx->tokenizer_path,
-        cat_class_ctx->total_labels);
+        ctx->target
+        );
 
     av_freep(&combined_labels);
     return ret;
@@ -628,8 +630,10 @@ static int dnn_classify_activate(AVFilterContext *filter_ctx)
                 if (ctx->label_classification_ctx) {
                     ret = ff_dnn_execute_model_clip(&ctx->dnnctx, in, NULL,
                         ctx->label_classification_ctx->labels,
+                        ctx->label_classification_ctx->label_count,
                         ctx->tokenizer_path,
-                        ctx->label_classification_ctx->label_count);
+                        ctx->target
+                        );
                 } else if (ctx->category_classification_ctx) {
                     ret = execute_clip_model_for_all_categories(ctx, in);
                 }

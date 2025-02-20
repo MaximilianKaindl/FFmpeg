@@ -32,6 +32,9 @@ extern "C" {
 #include "libavutil/mem.h"
 #include "queue.h"
 #include "safe_queue.h"
+#include "libavutil/avassert.h"
+#include "libavutil/detection_bbox.h"
+#include "libavutil/avstring.h"
 }
 
 typedef struct THModel {
