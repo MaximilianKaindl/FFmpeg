@@ -1151,43 +1151,6 @@ static int get_input_ov(DNNModel *model, DNNData *input, const char *input_name)
 #endif
 }
 
-static int contain_valid_detection_bbox(AVFrame *frame)
-{
-    AVFrameSideData *sd;
-    const AVDetectionBBoxHeader *header;
-    const AVDetectionBBox *bbox;
-
-    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-    if (!sd) { // this frame has nothing detected
-        return 0;
-    }
-
-    if (!sd->size) {
-        return 0;
-    }
-
-    header = (const AVDetectionBBoxHeader *)sd->data;
-    if (!header->nb_bboxes) {
-        return 0;
-    }
-
-    for (uint32_t i = 0; i < header->nb_bboxes; i++) {
-        bbox = av_get_detection_bbox(header, i);
-        if (bbox->x < 0 || bbox->w < 0 || bbox->x + bbox->w >= frame->width) {
-            return 0;
-        }
-        if (bbox->y < 0 || bbox->h < 0 || bbox->y + bbox->h >= frame->height) {
-            return 0;
-        }
-
-        if (bbox->classify_count == AV_NUM_DETECTION_BBOX_CLASSIFY) {
-            return 0;
-        }
-    }
-
-    return 1;
-}
-
 static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Queue *lltask_queue, DNNExecBaseParams *exec_params)
 {
     switch (func_type) {
@@ -1217,7 +1180,7 @@ static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Q
         task->inference_todo = 0;
         task->inference_done = 0;
 
-        if (!contain_valid_detection_bbox(frame)) {
+        if (!ff_dnn_contain_valid_detection_bbox(frame)) {
             return 0;
         }
 
