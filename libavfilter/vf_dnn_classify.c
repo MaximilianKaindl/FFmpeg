@@ -63,17 +63,16 @@
     { "openvino",    "openvino backend flag",      0,                        AV_OPT_TYPE_CONST,     { .i64 = DNN_OV },    0, 0, FLAGS, .unit = "backend" },
  #endif
  #if (CONFIG_LIBTORCH == 1)
-     { "torch", "torch backend flag", 0, AV_OPT_TYPE_CONST, { .i64 = DNN_TH }, 0, 0, FLAGS, .unit = "backend" },
+    { "torch",      "torch backend flag",          0,                        AV_OPT_TYPE_CONST,     { .i64 = DNN_TH },    0, 0, FLAGS, .unit = "backend" },
  #endif
     { "confidence",  "threshold of confidence",    OFFSET2(confidence),      AV_OPT_TYPE_FLOAT,     { .dbl = 0.5 },  0, 1, FLAGS},
     { "labels",      "path to labels file",        OFFSET2(labels_filename), AV_OPT_TYPE_STRING,    { .str = NULL }, 0, 0, FLAGS },
     { "target",      "which one to be classified", OFFSET2(target),          AV_OPT_TYPE_STRING,    { .str = NULL }, 0, 0, FLAGS },
- // CLIP-specific options
-     { "categories", "path to categories file (CLIP only)", OFFSET2(categories_filename), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
-     { "logit_scale", "logit scale for CLIP", OFFSET2(logit_scale), AV_OPT_TYPE_FLOAT, { .dbl = 4.6052 }, 0, 100.0, FLAGS },
-     { "temperature", "softmax temperature for CLIP", OFFSET2(temperature), AV_OPT_TYPE_FLOAT, { .dbl = 1.0 }, 0, 100.0, FLAGS },
-     { "tokenizer", "path to text tokenizer.json file (CLIP only)", OFFSET2(tokenizer_path), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
-     { NULL }
+    { "categories", "path to categories file (CLIP only)",         OFFSET2(categories_filename), AV_OPT_TYPE_STRING,         { .str = NULL }, 0, 0, FLAGS },
+    { "logit_scale", "logit scale for CLIP",                       OFFSET2(logit_scale),         AV_OPT_TYPE_FLOAT,          { .dbl = 4.6052 }, 0, 100.0, FLAGS },
+    { "temperature", "softmax temperature for CLIP",               OFFSET2(temperature),         AV_OPT_TYPE_FLOAT,          { .dbl = 1.0 }, 0, 100.0, FLAGS },
+    { "tokenizer", "path to text tokenizer.json file (CLIP only)", OFFSET2(tokenizer_path),      AV_OPT_TYPE_STRING,         { .str = NULL }, 0, 0, FLAGS },
+    { NULL }
  };
  
  AVFILTER_DNN_DEFINE_CLASS(dnn_classify, DNN_OV);
@@ -234,7 +233,7 @@ static AVDetectionBBox *find_or_create_detection_bbox(AVFrame *frame, uint32_t b
         av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", bbox_index);
         return AVERROR(EINVAL);
     }
-    
+
     return bbox;
 }
 
