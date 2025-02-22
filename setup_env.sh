@@ -52,16 +52,40 @@ for desc in "${!required_files[@]}"; do
     fi
 done
 
-# Configure FFmpeg
 ./configure \
+    --enable-gpl \
     --enable-debug \
+    --enable-openssl \
+    --enable-libx264 \
+    --enable-libx265 \
+    --enable-libvpx \
+    --enable-libfdk-aac \
+    --enable-libmp3lame \
+    --enable-libopus \
+    --enable-libass \
+    --enable-libfreetype \
+    --enable-libfontconfig \
+    --enable-libxcb \
+    --enable-sdl2 \
+    --enable-libopenvino \
     --enable-libtorch \
+    --enable-libtorch_cuda \
     --enable-libtokenizers \
+    --enable-cuda-nvcc \
+    --enable-libnpp \
+    --enable-nonfree \
     --extra-cflags="-I$LIBTORCH_HEADER \
                     -I$LIBTORCH_HEADER_CSRC \
-                    -I$TOKENIZER_HEADER" \
-    --extra-ldflags="-L$LIBTORCH_LIB \
-                     -L$TOKENIZER_LIB"
+                    -I$TOKENIZER_HEADER \
+                    -I/opt/intel/openvino/runtime/include" \
+    --extra-ldflags="-L/opt/intel/openvino/runtime/lib/intel64 \
+                     -L$LIBTORCH_LIB \
+                     -L$TOKENIZER_LIB \
+                     -Wl,--no-as-needed \
+                     -ltorch_cuda -lc10_cuda \
+                     -Wl,--as-needed \
+                     -lcudart -lcuda -lcudnn"
+
 
 if [ $? -ne 0 ]; then
     echo "Error: FFmpeg configuration failed"

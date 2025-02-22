@@ -55,6 +55,7 @@ done
 # Configure FFmpeg
 ./configure \
     --enable-debug \
+    --enable-libopenvino \
     --enable-libtorch \
     --enable-libtorch_cuda \
     --enable-libtokenizers \
@@ -65,7 +66,7 @@ done
                     -I$LIBTORCH_HEADER_CSRC \
                     -I$TOKENIZER_HEADER \
                     -I/opt/intel/openvino/runtime/include" \
-    --extra-ldflags="-L$LIBTORCH_LIB -L$TOKENIZER_LIB -Wl,--no-as-needed -ltorch_cuda -lc10_cuda -Wl,--as-needed -lcudart -lcuda -lcudnn"
+    --extra-ldflags="-L/opt/intel/openvino/runtime/lib/intel64 -L$LIBTORCH_LIB -L$TOKENIZER_LIB -Wl,--no-as-needed -ltorch_cuda -lc10_cuda -Wl,--as-needed -lcudart -lcuda -lcudnn"
 
 if [ $? -ne 0 ]; then
     echo "Error: FFmpeg configuration failed"
