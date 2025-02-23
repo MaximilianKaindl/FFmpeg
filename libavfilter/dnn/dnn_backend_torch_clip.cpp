@@ -159,46 +159,49 @@ int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx) {
     }
 }
 
+int apply_clip_image_preprocessing(torch::Tensor *input_tensor) {
+    // Resize using bicubic interpolation
+    auto resized = torch::nn::functional::interpolate(
+        *input_tensor,
+        torch::nn::functional::InterpolateFuncOptions()
+            .size(std::vector<int64_t>{224, 224})
+            .mode(torch::kBicubic)
+            .align_corners(false)
+    );
+    
+    //Manual center crop if needed
+    auto h = resized.size(2);
+    auto w = resized.size(3);
+    int64_t crop_size = 224;
 
-int encode_image_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device) {
-    THInferRequest *infer_request = request->infer_request;
+    int64_t h_start = (h - crop_size) / 2;
+    int64_t w_start = (w - crop_size) / 2;
+
+    auto cropped = resized.slice(2, h_start, h_start + crop_size)
+                        .slice(3, w_start, w_start + crop_size);
+
+    // Apply CLIP specific normalization
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(input_tensor->device());
+    auto mean = torch::tensor({0.48145466, 0.4578275, 0.40821073}, options).view({1, 3, 1, 1});
+    auto std = torch::tensor({0.26862954, 0.26130258, 0.27577711}, options).view({1, 3, 1, 1});
+    
+    *input_tensor = (resized - mean) / std;
+    return 0;
+}
+
+int encode_image_clip(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device& device) {
     DnnContext *ctx = th_model->ctx;
-
     try {               
-        if (infer_request->input_tensor->device() != device) 
-            *infer_request->input_tensor = infer_request->input_tensor->to(device);
+        if (input_tensor->device() != device) {
+            *input_tensor = input_tensor->to(device);
+        }
 
-        // Step 1: Resize using bicubic interpolation
-        auto resized = torch::nn::functional::interpolate(
-            *infer_request->input_tensor,
-            torch::nn::functional::InterpolateFuncOptions()
-                .size(std::vector<int64_t>{224, 224})
-                .mode(torch::kBicubic)
-                .align_corners(false)
-        );
-
-        //Manual center crop if needed
-        auto h = resized.size(2);
-        auto w = resized.size(3);
-        int64_t crop_size = 224;
-        
-        int64_t h_start = (h - crop_size) / 2;
-        int64_t w_start = (w - crop_size) / 2;
-        
-        auto cropped = resized.slice(2, h_start, h_start + crop_size)
-                             .slice(3, w_start, w_start + crop_size);
-
-        // Apply CLIP specific normalization
-        auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device);
-        auto mean = torch::tensor({0.48145466, 0.4578275, 0.40821073}, options).view({1, 3, 1, 1});
-        auto std = torch::tensor({0.26862954, 0.26130258, 0.27577711}, options).view({1, 3, 1, 1});
-        
-        *infer_request->input_tensor = (cropped - mean) / std;
+        apply_clip_image_preprocessing(input_tensor);
 
         // Get image features
         auto image_features = th_model->jit_model->run_method(
             "encode_image",
-            *infer_request->input_tensor,
+            *input_tensor,
             true  // normalize
         );
 
@@ -206,11 +209,51 @@ int encode_image_clip(const THModel *th_model, const THRequestItem *request, con
             av_log(ctx, AV_LOG_ERROR, "Model returned invalid non-tensor output\n");
             return AVERROR(EINVAL);
         }
-        *infer_request->input_tensor = image_features.toTensor();
+
+        // Update input tensor with the encoded features
+        *input_tensor = image_features.toTensor();
         return 0;
 
     } catch (const c10::Error& e) {
         av_log(ctx, AV_LOG_ERROR, "Image encoding error: %s\n", e.what());
+        return AVERROR(EINVAL);
+    }
+}
+
+int encode_images_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device) {
+    THInferRequest *infer_request = request->infer_request;
+    DnnContext *ctx = th_model->ctx;
+    std::vector<torch::Tensor> image_features;
+
+    try {
+        // Process each image in the batch
+        for (int i = 0; i < request->lltask_count; i++) {
+            // Get current tensor (should be [C, H, W])
+            auto current_tensor = infer_request->input_tensor->select(0, i);
+            
+            // Unsqueeze to add batch dimension [1, C, H, W]
+            current_tensor = current_tensor.unsqueeze(0);
+            
+            int ret = encode_image_clip(th_model, &current_tensor, device);
+            if (ret < 0) {
+                av_log(ctx, AV_LOG_ERROR, "Image encoding failed for batch item %d\n", i);
+                return ret;
+            }
+            
+            image_features.push_back(current_tensor.squeeze(0));  // Remove batch dimension for stacking
+        }
+
+        // Stack all image features
+        if (!image_features.empty()) {
+            *infer_request->input_tensor = torch::stack(image_features);
+        } else {
+            av_log(ctx, AV_LOG_ERROR, "No valid images to process in batch\n");
+            return AVERROR(EINVAL);
+        }
+        return 0;
+        
+    } catch (const c10::Error& e) {
+        av_log(ctx, AV_LOG_ERROR, "Batch processing error: %s\n", e.what());
         return AVERROR(EINVAL);
     }
 }
@@ -252,7 +295,7 @@ int encode_text_clip(const THModel *th_model, const THRequestItem *request, cons
 int forward_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device)
 {
     int ret;
-    ret = encode_image_clip(th_model, request, device);
+    ret = encode_images_clip(th_model, request, device);
     if (ret < 0) {
         av_log(th_model->ctx, AV_LOG_ERROR, "Image encoding failed in CLIP preprocessing\n");
         return ret;
@@ -322,28 +365,34 @@ static torch::Tensor calculate_clip_similarity_matrix(const torch::Tensor& image
 int process_clip_similarity(const THModel *th_model, const THRequestItem *request, const c10::Device& device) {
     DnnContext *ctx = th_model->ctx;
     THInferRequest *infer_request = request->infer_request;
-    std::vector<float> similarity_scores;
+    int64_t batch_size = infer_request->input_tensor->size(0);
+    std::vector<std::vector<float>> all_similarity_scores(batch_size);
     auto embedding_count = infer_request->text_embeddings->size();
-    similarity_scores.reserve(embedding_count);
+    std::vector<torch::Tensor> batch_tensors;
 
     try {
-        if(infer_request->input_tensor->device() != device)
-            *infer_request->input_tensor = infer_request->input_tensor->to(device);
+        // Process each item in batch
+        for (int64_t batch_idx = 0; batch_idx < batch_size; batch_idx++) {
+            auto image_features = infer_request->input_tensor->select(0, batch_idx);
+            std::vector<float>& similarity_scores = all_similarity_scores[batch_idx];
+            similarity_scores.reserve(embedding_count);
 
-        for (size_t i = 0; i < embedding_count; i++) {
-            if((*infer_request->text_embeddings)[i].device() != device) {
-                (*infer_request->text_embeddings)[i] = (*infer_request->text_embeddings)[i].to(device);
+            for (size_t i = 0; i < embedding_count; i++) {
+                if((*infer_request->text_embeddings)[i].device() != device) {
+                    (*infer_request->text_embeddings)[i] = (*infer_request->text_embeddings)[i].to(device);
+                }
+                auto similarity = calculate_clip_similarity_matrix(image_features, (*infer_request->text_embeddings)[i], ctx);
+                auto similarity_value = similarity.item<float>();
+                similarity_scores.push_back(similarity_value);
+
+                av_log(ctx, AV_LOG_DEBUG, "BBox %ld, Label %s: logit_value=%.4f\n",
+                       batch_idx, th_model->clip_ctx->labels[i].c_str(), similarity_value);
             }
-            auto similarity = calculate_clip_similarity_matrix(*infer_request->input_tensor, (*infer_request->text_embeddings)[i], ctx);
-            auto similarity_value = similarity.item<float>();
-            similarity_scores.push_back(similarity_value);
-
-            av_log(ctx, AV_LOG_DEBUG, "Label %s: logit_value=%.4f\n",
-                   th_model->clip_ctx->labels[i].c_str(), similarity_value);
+            batch_tensors.push_back(torch::tensor(similarity_scores));
         }
-
-        // Convert scores to tensor and compute softmax
-        auto scores_tensor = torch::tensor(similarity_scores);
+        
+        // Stack all scores into a single batch tensor
+        auto scores_tensor = torch::stack(batch_tensors);
         infer_request->output = new torch::Tensor(scores_tensor);
         
         if (!infer_request->output->defined()) {

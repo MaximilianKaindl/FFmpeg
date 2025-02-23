@@ -47,7 +47,8 @@ int forward_clip(const THModel *th_model, const THRequestItem *request, const c1
 int process_clip_similarity(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 
 int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path);
-int encode_image_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
+int encode_image_clip(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device& device);
+int encode_images_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 int encode_text_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 
 int set_params_clip(const THModel *th_model, const char **labels, const int& label_count,

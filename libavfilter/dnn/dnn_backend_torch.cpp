@@ -97,7 +97,9 @@ static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Q
 
         for (uint32_t i = 0; i < header->nb_bboxes; i++) {
             const AVDetectionBBox *bbox = av_get_detection_bbox(header, i);
-
+            if (bbox->w * bbox->h <= 0) {
+                continue;  
+            }
             if (params->target) {
                 if (av_strncasecmp(bbox->detect_label, params->target, sizeof(bbox->detect_label)) != 0) {
                     continue;
@@ -156,7 +158,7 @@ static inline void destroy_request_item(THRequestItem **arg)
     item = *arg;
     th_free_request(item->infer_request);
     av_freep(&item->infer_request);
-    av_freep(&item->lltask);
+    av_freep(&item->lltasks);
     ff_dnn_async_module_cleanup(&item->exec_module);
     av_freep(arg);
 }
@@ -218,19 +220,11 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
 {
     LastLevelTaskItem *lltask = NULL;
     TaskItem *task = NULL;
-    THInferRequest *infer_request = NULL;
+    THInferRequest *infer_request = request->infer_request;
     DNNData input = { 0 };
     DnnContext *ctx = th_model->ctx;
     int ret, width_idx, height_idx, channel_idx;
-
-    lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
-    if (!lltask) {
-        ret = AVERROR(EINVAL);
-        goto err;
-    }
-    request->lltask = lltask;
-    task = lltask->task;
-    infer_request = request->infer_request;
+    std::vector<torch::Tensor> batch_tensors;
 
     ret = get_input_th(&th_model->model, &input, NULL);
     if ( ret != 0) {
@@ -239,48 +233,87 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     width_idx = dnn_get_width_idx_by_layout(input.layout);
     height_idx = dnn_get_height_idx_by_layout(input.layout);
     channel_idx = dnn_get_channel_idx_by_layout(input.layout);
-    input.dims[height_idx] = task->in_frame->height;
-    input.dims[width_idx] = task->in_frame->width;
-    input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
-                           input.dims[channel_idx] * sizeof(float));
-    if (!input.data)
-        return AVERROR(ENOMEM);
     infer_request->input_tensor = new torch::Tensor();
     infer_request->output = new torch::Tensor();
 
-    switch (th_model->model.func_type) {
-    case DFT_PROCESS_FRAME:
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    case DFT_ANALYTICS_CLIP:
-    #endif
-        input.scale = 255;
-        if (task->do_ioproc) {
-            if (th_model->model.frame_pre_proc != NULL) {
-                th_model->model.frame_pre_proc(task->in_frame, &input, th_model->model.filter_ctx);
-            } else {
-                ff_proc_from_frame_to_dnn(task->in_frame, &input, ctx);
-            }
+    while (ff_queue_size(th_model->lltask_queue) != 0) {
+        lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
+        if (!lltask) {
+            break;
         }
-        break;
-    default:
-        avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
-        break;
+        request->lltasks[request->lltask_count++] = lltask;
+        task = lltask->task;
+
+        input.dims[height_idx] = task->in_frame->height;
+        input.dims[width_idx] = task->in_frame->width;
+        input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
+                            input.dims[channel_idx] * sizeof(float));
+        if (!input.data){
+            ret = AVERROR(ENOMEM);
+            goto err;
+        }
+        switch (th_model->model.func_type) {
+        case DFT_PROCESS_FRAME:
+        case DFT_ANALYTICS_CLIP:
+            input.scale = 255;
+            if (task->do_ioproc) {
+                if (th_model->model.frame_pre_proc != NULL) {
+                    th_model->model.frame_pre_proc(task->in_frame, &input, th_model->model.filter_ctx);
+                } else {
+                    ff_proc_from_frame_to_dnn(task->in_frame, &input, ctx);
+                }
+            }
+            break;
+        default:
+            avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
+            ret = AVERROR(EINVAL);
+            goto err;
+        }
+
+        try {
+            auto tensor = torch::from_blob(input.data,
+                {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
+                deleter, torch::kFloat32).clone();
+            batch_tensors.push_back(tensor);
+            input.data = NULL;  // Ownership transferred to tensor
+        } catch (const c10::Error& e) {
+            av_log(ctx, AV_LOG_ERROR, "Error creating tensor: %s\n", e.what());
+            ret = AVERROR(EINVAL);
+            goto err;
+        }
+
+        av_freep(&input.data);
     }
-    *infer_request->input_tensor = torch::from_blob(input.data,
-        {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
-        deleter, torch::kFloat32);
+
+    // Stack tensors into batch
+    try {
+        if (!batch_tensors.empty()) {
+            *infer_request->input_tensor = torch::cat(batch_tensors,0);
+        } else {
+            av_log(ctx, AV_LOG_ERROR, "No tensors to process\n");
+            ret = AVERROR(EINVAL);
+            goto err;
+        }
+    } catch (const c10::Error& e) {
+        av_log(ctx, AV_LOG_ERROR, "Error creating batch tensor: %s\n", e.what());
+        ret = AVERROR(EINVAL);
+        goto err;
+    }
+
     #if (CONFIG_LIBTOKENIZERS == 1)
     if(th_model->is_clip_model){
         ret = fill_model_input_clip(th_model, request, input);
         if (ret < 0) {
             goto err;
         }
-        return 0;
     }
     #endif
     return 0;
 
 err:
+    if (input.data) {
+        av_freep(&input.data);
+    }
     th_free_request(infer_request);
     return ret;
 }
@@ -301,7 +334,7 @@ static int th_start_inference(void *args)
         return AVERROR(EINVAL);
     }
     infer_request = request->infer_request;
-    lltask = request->lltask;
+    lltask = request->lltasks[0];
     task = lltask->task;
     th_model = (THModel *)task->model;
     ctx = th_model->ctx;
@@ -337,7 +370,7 @@ static int th_start_inference(void *args)
 
 static void infer_completion_callback(void *args) {
     THRequestItem *request = (THRequestItem*)args;
-    LastLevelTaskItem *lltask = request->lltask;
+    LastLevelTaskItem *lltask = request->lltasks[0];
     TaskItem *task = lltask->task;
     DNNData outputs = { 0 };
     THInferRequest *infer_request = request->infer_request;
@@ -349,12 +382,19 @@ static void infer_completion_callback(void *args) {
     outputs.layout = DL_NCHW;
     outputs.dt = DNN_FLOAT;
     #if (CONFIG_LIBTOKENIZERS == 1)
-    if (th_model->is_clip_model && sizes.size() == 1) {
-        //Do nothing Clip output has only one dimension which are the similarity scores
-    }
-    else
+    if (th_model->is_clip_model) {
+        // CLIP outputs are similarity scores [batch_size, num_labels]
+        if (sizes.size() != 2) {
+            av_log(th_model->ctx, AV_LOG_ERROR, "Invalid CLIP output dimensions\n");
+            goto err;
+        }
+        outputs.dims[0] = sizes[0];  // batch_size
+        outputs.dims[1] = sizes[1];  // number of labels
+        outputs.order = DCO_RGB;  // doesn't matter for similarity scores
+        outputs.dt = DNN_FLOAT;
+    } else 
     #endif
-    if (sizes.size() == 4) {
+    if (sizes.size() == 4 && th_model->model.func_type == DFT_PROCESS_FRAME) {
         // 4 dimensions: [batch_size, channel, height, width]
         // this format of data is normally used for video frame SR
         outputs.dims[0] = sizes.at(0); // N
@@ -366,54 +406,67 @@ static void infer_completion_callback(void *args) {
         goto err;
     }
 
-    switch (th_model->model.func_type) {
-    case DFT_PROCESS_FRAME:
-        if (task->do_ioproc) {
-            // Post process can only deal with CPU memory.
-            if (output->device() != torch::kCPU)
-                *output = output->to(torch::kCPU);
-            outputs.scale = 255;
-            outputs.data = output->data_ptr();
-            if (th_model->model.frame_post_proc != NULL) {
-                th_model->model.frame_post_proc(task->out_frame, &outputs, th_model->model.filter_ctx);
+    // Process each item in the batch
+    for (int i = 0; i < request->lltask_count; i++) {
+        LastLevelTaskItem *lltask = request->lltasks[i];
+        TaskItem *task = lltask->task;
+
+        // Extract single item from batch
+        torch::Tensor single_output;
+        try {
+            single_output = output->select(0, i);
+            
+            // Move to CPU if needed
+            if (single_output.device() != torch::kCPU) {
+                single_output = single_output.to(torch::kCPU);
+            }
+            
+            outputs.data = single_output.data_ptr();
+        } catch (const c10::Error& e) {
+            av_log(th_model->ctx, AV_LOG_ERROR, "Error processing output tensor: %s\n", e.what());
+            goto err;
+        }
+
+        switch (th_model->model.func_type) {
+        case DFT_PROCESS_FRAME:
+            if (task->do_ioproc) {
+                outputs.scale = 255;
+                if (th_model->model.frame_post_proc != NULL) {
+                    th_model->model.frame_post_proc(task->out_frame, &outputs, th_model->model.filter_ctx);
+                } else {
+                    ff_proc_from_dnn_to_frame(task->out_frame, &outputs, th_model->ctx);
+                }
             } else {
-                ff_proc_from_dnn_to_frame(task->out_frame, &outputs, th_model->ctx);
+                task->out_frame->width = outputs.dims[dnn_get_width_idx_by_layout(outputs.layout)];
+                task->out_frame->height = outputs.dims[dnn_get_height_idx_by_layout(outputs.layout)];
             }
-        } else {
-            task->out_frame->width = outputs.dims[dnn_get_width_idx_by_layout(outputs.layout)];
-            task->out_frame->height = outputs.dims[dnn_get_height_idx_by_layout(outputs.layout)];
-        }
-        break;
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    case DFT_ANALYTICS_CLIP:
-        if (task->do_ioproc) {
-            // Post process can only deal with CPU memory.
-            if (output->device() != torch::kCPU)
-                *output = output->to(torch::kCPU);
-            outputs.data = output->data_ptr<float>();
-            if (!th_model->model.classify_post_proc) {
-                av_log(th_model->ctx, AV_LOG_ERROR, "clip filter needs to provide post proc\n");
-                goto err;
+            break;
+        #if (CONFIG_LIBTOKENIZERS == 1)
+        case DFT_ANALYTICS_CLIP:
+            if (task->do_ioproc) {
+                if (!th_model->model.classify_post_proc) {
+                    av_log(th_model->ctx, AV_LOG_ERROR, "CLIP filter needs to provide post proc\n");
+                    goto err;
+                }
+                th_model->model.classify_post_proc(task->in_frame, &outputs, lltask->bbox_index, th_model->model.filter_ctx);
             }
-            th_model->model.classify_post_proc(task->in_frame, &outputs, lltask->bbox_index, th_model->model.filter_ctx);           
-        } else {
-            task->out_frame->width = outputs.dims[dnn_get_width_idx_by_layout(outputs.layout)];
-            task->out_frame->height = outputs.dims[dnn_get_height_idx_by_layout(outputs.layout)];
+            break;
+        #endif
+        default:
+            avpriv_report_missing_feature(th_model->ctx, "model function type %d", th_model->model.func_type);
+            goto err;
         }
-        break;
-    #endif
-    default:
-        avpriv_report_missing_feature(th_model->ctx, "model function type %d", th_model->model.func_type);
-        goto err;
+        task->inference_done++;
+        av_freep(&request->lltasks[i]);
     }
-    task->inference_done++;
-    av_freep(&request->lltask);
 err:
+    av_freep(&request->lltasks);
+    request->lltask_count = 0;
     th_free_request(infer_request);
 
     if (ff_safe_queue_push_back(th_model->request_queue, request) < 0) {
         destroy_request_item(&request);
-        av_log(th_model->ctx, AV_LOG_ERROR, "Unable to push back request_queue when failed to start inference.\n");
+        av_log(th_model->ctx, AV_LOG_ERROR, "Unable to push back request_queue\n");
     }
 }
 
@@ -600,7 +653,7 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
     if (!item) {
         goto fail;
     }
-    item->lltask = NULL;
+    item->lltasks = NULL;
     item->infer_request = th_create_inference_request();
     if (!item->infer_request) {
         av_log(NULL, AV_LOG_ERROR, "Failed to allocate memory for Torch inference request\n");
@@ -680,11 +733,22 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
         return ret;
     }
 
+    if(task->inference_todo == 0){
+        return 0;
+    } 
+    
     request = (THRequestItem *)ff_safe_queue_pop_front(th_model->request_queue);
     if (!request) {
         av_log(ctx, AV_LOG_ERROR, "unable to get infer request.\n");
         return AVERROR(EINVAL);
     }
+
+    request->lltasks = (LastLevelTaskItem **)av_malloc_array(task->inference_todo, sizeof(*request->lltasks));
+    if (!request->lltasks) {
+        av_log(ctx, AV_LOG_ERROR, "unable to create lltasks.\n");
+        return AVERROR(EINVAL);
+    }
+    request->lltask_count = 0;
 
     #if (CONFIG_LIBTOKENIZERS == 1)
     if(model->func_type == DFT_ANALYTICS_CLIP) {
