@@ -132,7 +132,7 @@ static int process_frame(AVFilterContext *ctx, AVFrame *frame)
     
     sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
     if (!sd || sd->size < sizeof(AVDetectionBBoxHeader)) {
-        av_log(ctx, AV_LOG_ERROR, "Invalid bbox side data\n"); 
+        av_log(ctx, AV_LOG_WARNING, "No bbox side data\n"); 
         return 0;
     }   
 
