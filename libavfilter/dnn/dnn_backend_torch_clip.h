@@ -33,7 +33,7 @@ typedef struct THClipContext {
     std::unique_ptr<Tokenizer> tokenizer;
     std::vector<std::string> labels;
     std::string tokenizer_path;
-    float logit_scale;
+    int64_t resolution;
 } THClipContext;
 
 const std::string START_TOKEN_CLIP = "<|startoftext|>";
@@ -41,13 +41,13 @@ const std::string END_TOKEN_CLIP = "<|endoftext|>";
 const int32_t PADDING_TOKEN_CLIP = 0;
 #define EMBEDDING_SIZE_CLIP 77
 
-int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx);
+int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx, const c10::Device &device);
 int fill_model_input_clip(const THModel *th_model, const THRequestItem *request, const DNNData& input);
 int forward_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 int process_clip_similarity(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 
 int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path);
-int encode_image_clip(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device& device);
+int encode_image_clip(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device& device, bool preprocessing);
 int encode_images_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 int encode_text_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 

@@ -635,7 +635,7 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         #if (CONFIG_LIBTOKENIZERS == 1)
         th_model->is_clip_model = false;
         // Check if this is a CLIP model and initialize accordingly
-        if (func_type == DFT_ANALYTICS_CLIP && init_clip_model(th_model,filter_ctx) > 0) {
+        if (func_type == DFT_ANALYTICS_CLIP && init_clip_model(th_model,filter_ctx, device) > 0) {
             goto fail;
         }
         #endif

@@ -140,63 +140,64 @@ int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path)
     return 0;
 }
 
-int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx) {
+int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx, const c10::Device &device) {
+    // Common CLIP input dimensions to test
+    std::vector<int64_t> test_dims[] = {
+        {1, 3, 224, 224},  
+        {1, 3, 256, 256}, 
+        {1, 3, 384, 384},
+        {1, 3, 378, 378},
+    };
+    bool found_dims = false;
+    int64_t resolution = 0;
     try {
         //Should throw exception if not existing
         auto encode_image = th_model->jit_model->get_method("encode_image");
+        for (const auto& dims : test_dims) {
+            // Create test input tensor
+            torch::Tensor test_input = torch::zeros(dims);
+            
+            if(encode_image_clip(th_model, &test_input, device, false) < 0) {
+                continue;
+            }
+            resolution = dims[2];
+            found_dims = true;
+            break;
+        }
+        if(!found_dims){
+            return AVERROR(EINVAL);
+        }
         auto encode_text = th_model->jit_model->get_method("encode_text");
-        th_model->is_clip_model = true;
-        th_model->clip_ctx = (THClipContext *)av_mallocz(sizeof(THClipContext));
-        th_model->clip_ctx->logit_scale = std::exp(std::log(1.0f / 0.07f));
-        av_log(th_model->ctx, AV_LOG_INFO, 
-               "Successfully initialized CLIP model\n");
-        return 0;
-
     } catch (const c10::Error& e) {
         av_log(th_model->ctx, AV_LOG_ERROR, 
                "Error during CLIP model initialization: %s\n", e.what());
         return AVERROR(EINVAL);
     }
-}
 
-int apply_clip_image_preprocessing(torch::Tensor *input_tensor) {
-    // Resize using bicubic interpolation
-    auto resized = torch::nn::functional::interpolate(
-        *input_tensor,
-        torch::nn::functional::InterpolateFuncOptions()
-            .size(std::vector<int64_t>{224, 224})
-            .mode(torch::kBicubic)
-            .align_corners(false)
-    );
-    
-    //Manual center crop if needed
-    auto h = resized.size(2);
-    auto w = resized.size(3);
-    int64_t crop_size = 224;
-
-    int64_t h_start = (h - crop_size) / 2;
-    int64_t w_start = (w - crop_size) / 2;
-
-    auto cropped = resized.slice(2, h_start, h_start + crop_size)
-                        .slice(3, w_start, w_start + crop_size);
-
-    // Apply CLIP specific normalization
-    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(input_tensor->device());
-    auto mean = torch::tensor({0.48145466, 0.4578275, 0.40821073}, options).view({1, 3, 1, 1});
-    auto std = torch::tensor({0.26862954, 0.26130258, 0.27577711}, options).view({1, 3, 1, 1});
-    
-    *input_tensor = (resized - mean) / std;
+    th_model->is_clip_model = true;
+    th_model->clip_ctx = (THClipContext *)av_mallocz(sizeof(THClipContext));
+    th_model->clip_ctx->resolution = resolution;
+    av_log(th_model->ctx, AV_LOG_INFO, 
+            "Successfully initialized CLIP model\n");
     return 0;
 }
 
-int encode_image_clip(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device& device) {
+int encode_image_clip(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device& device, bool preprocessing) {
     DnnContext *ctx = th_model->ctx;
     try {               
         if (input_tensor->device() != device) {
             *input_tensor = input_tensor->to(device);
         }
 
-        apply_clip_image_preprocessing(input_tensor);
+        if(preprocessing){
+            *input_tensor = torch::nn::functional::interpolate(
+                *input_tensor,
+                torch::nn::functional::InterpolateFuncOptions()
+                    .size(std::vector<int64_t>{th_model->clip_ctx->resolution, th_model->clip_ctx->resolution})
+                    .mode(torch::kBicubic)
+                    .align_corners(false)
+            );
+        }
 
         // Get image features
         auto image_features = th_model->jit_model->run_method(
@@ -234,7 +235,7 @@ int encode_images_clip(const THModel *th_model, const THRequestItem *request, co
             // Unsqueeze to add batch dimension [1, C, H, W]
             current_tensor = current_tensor.unsqueeze(0);
             
-            int ret = encode_image_clip(th_model, &current_tensor, device);
+            int ret = encode_image_clip(th_model, &current_tensor, device, true);
             if (ret < 0) {
                 av_log(ctx, AV_LOG_ERROR, "Image encoding failed for batch item %d\n", i);
                 return ret;
