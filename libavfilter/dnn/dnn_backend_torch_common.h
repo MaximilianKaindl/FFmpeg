@@ -51,6 +51,7 @@
  
      #if CONFIG_LIBTOKENIZERS
      bool is_clip_model;
+     bool is_clap_model;
      THClipContext *clip_ctx;
      #endif
  

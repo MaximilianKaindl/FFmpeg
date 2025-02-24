@@ -19,6 +19,9 @@
 #define AVFILTER_DNN_DNN_BACKEND_TORCH_CLIP_H
 
 #include "dnn_backend_torch_common.h"
+extern "C" {
+    #include "libswresample/swresample.h"
+}
 
 #if (CONFIG_LIBTOKENIZERS == 1)
 #include <string>
@@ -40,11 +43,13 @@ const std::string START_TOKEN_CLIP = "<|startoftext|>";
 const std::string END_TOKEN_CLIP = "<|endoftext|>";
 const int32_t PADDING_TOKEN_CLIP = 0;
 #define EMBEDDING_SIZE_CLIP 77
+#define CLAP_SAMPLE_RATE 48000
 
-int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx, const c10::Device &device);
+int init_clip_model(THModel *th_model, DNNFunctionType func_type, const AVFilterContext *filter_ctx, const c10::Device &device);
 int fill_model_input_clip(const THModel *th_model, const THRequestItem *request, const DNNData& input);
 int forward_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 int process_clip_similarity(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
+int forward_clap(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
 
 int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path);
 int encode_image_clip(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device& device, bool preprocessing);

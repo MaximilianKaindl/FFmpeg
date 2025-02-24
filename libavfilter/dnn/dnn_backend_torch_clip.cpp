@@ -140,7 +140,7 @@ int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path)
     return 0;
 }
 
-int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx, const c10::Device &device) {
+int get_clip_input_res(THModel *th_model, const c10::Device &device) {
     // Common CLIP input dimensions to test
     std::vector<int64_t> test_dims[] = {
         {1, 3, 224, 224},  
@@ -150,36 +150,147 @@ int init_clip_model(THModel *th_model, const AVFilterContext *filter_ctx, const 
     };
     bool found_dims = false;
     int64_t resolution = 0;
-    try {
-        //Should throw exception if not existing
-        auto encode_image = th_model->jit_model->get_method("encode_image");
-        for (const auto& dims : test_dims) {
-            // Create test input tensor
-            torch::Tensor test_input = torch::zeros(dims);
-            
-            if(encode_image_clip(th_model, &test_input, device, false) < 0) {
-                continue;
-            }
-            resolution = dims[2];
-            found_dims = true;
-            break;
+
+    for (const auto& dims : test_dims) {
+        // Create test input tensor
+        torch::Tensor test_input = torch::zeros(dims);
+        
+        if(encode_image_clip(th_model, &test_input, device, false) < 0) {
+            continue;
         }
-        if(!found_dims){
-            return AVERROR(EINVAL);
-        }
-        auto encode_text = th_model->jit_model->get_method("encode_text");
-    } catch (const c10::Error& e) {
-        av_log(th_model->ctx, AV_LOG_ERROR, 
-               "Error during CLIP model initialization: %s\n", e.what());
+        resolution = dims[2];
+        found_dims = true;
+        break;
+    }
+    if(!found_dims){
         return AVERROR(EINVAL);
     }
+    return resolution;
+}
 
-    th_model->is_clip_model = true;
+int init_clip_model(THModel *th_model, DNNFunctionType func_type, const AVFilterContext *filter_ctx, const c10::Device &device) {
     th_model->clip_ctx = (THClipContext *)av_mallocz(sizeof(THClipContext));
-    th_model->clip_ctx->resolution = resolution;
-    av_log(th_model->ctx, AV_LOG_INFO, 
+    if (!th_model->clip_ctx) {
+        av_log(th_model->ctx, AV_LOG_ERROR, "Failed to allocate memory for CLIP context\n");
+        return AVERROR(ENOMEM);
+    }
+    if(func_type == DFT_ANALYTICS_CLAP){
+        th_model->is_clap_model = true;
+    }
+    else{
+        try {
+            //Should throw exception if not existing
+            auto encode_text = th_model->jit_model->get_method("encode_text");
+            auto encode_image = th_model->jit_model->get_method("encode_image");
+            th_model->is_clip_model = true;
+            th_model->clip_ctx->resolution = get_clip_input_res(th_model, device);
+            if(th_model->clip_ctx->resolution <= 0){
+                av_log(th_model->ctx, AV_LOG_ERROR, 
+                        "Failed to determine input resolution for CLIP model\n");
+                return AVERROR(EINVAL);
+            }
+        } catch (const c10::Error& e) {
+            av_log(th_model->ctx, AV_LOG_ERROR, 
+                   "Error during CLIP model initialization: %s\n", e.what());
+            return AVERROR(EINVAL);
+        }
+        av_log(th_model->ctx, AV_LOG_INFO, 
             "Successfully initialized CLIP model\n");
+    }
+    
     return 0;
+}
+
+static int resample_audio(AVFrame *frame, int target_sample_rate, float **resampled_data, int *resampled_nb_samples) {
+    SwrContext *swr_ctx = NULL;
+    int ret = 0;
+    AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_MONO;
+    AVChannelLayout in_ch_layout;
+    av_channel_layout_copy(&in_ch_layout, &frame->ch_layout);
+
+    ret = swr_alloc_set_opts2(&swr_ctx,
+                            &out_ch_layout,          // out_ch_layout
+                            AV_SAMPLE_FMT_FLT,        // out_sample_fmt
+                            target_sample_rate,       // out_sample_rate
+                            &in_ch_layout,           // in_ch_layout
+                            (AVSampleFormat)frame->format, // in_sample_fmt
+                            frame->sample_rate,       // in_sample_rate
+                            0, NULL);
+
+    av_channel_layout_uninit(&in_ch_layout);
+    
+    if (ret < 0) {
+        return AVERROR(ENOMEM);
+    }
+    
+    // Initialize the resampler
+    ret = swr_init(swr_ctx);
+    if (ret < 0) {
+        swr_free(&swr_ctx);
+        return ret;
+    }
+    
+    // Calculate output number of samples
+    *resampled_nb_samples = av_rescale_rnd(frame->nb_samples,
+                                          target_sample_rate,
+                                          frame->sample_rate,
+                                          AV_ROUND_UP);
+    
+    // Allocate output buffer
+    *resampled_data = (float*)av_malloc(*resampled_nb_samples * sizeof(float));
+    if (!*resampled_data) {
+        swr_free(&swr_ctx);
+        return AVERROR(ENOMEM);
+    }
+    
+    // Do the actual resampling
+    ret = swr_convert(swr_ctx,
+                      (uint8_t**)resampled_data, *resampled_nb_samples,
+                      (const uint8_t**)frame->data, frame->nb_samples);
+    
+    swr_free(&swr_ctx);
+    
+    if (ret < 0) {
+        av_freep(resampled_data);
+        return ret;
+    }
+    
+    return 0;
+}
+
+int encode_audio_clap(const THModel *th_model, const THRequestItem *request, const c10::Device& device) {
+    THInferRequest *infer_request = request->infer_request;
+    LastLevelTaskItem *lltask = request->lltasks[0];
+    TaskItem *task = lltask->task;
+    DnnContext *ctx = th_model->ctx;
+    float *resampled_data = NULL;
+    int resampled_nb_samples = 0;
+    
+    try {
+        // Resample audio to 48kHz if needed
+        int ret = resample_audio(task->in_frame, CLAP_SAMPLE_RATE,
+                               &resampled_data, &resampled_nb_samples);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "Audio resampling failed\n");
+            return ret;
+        }
+        
+        // Create input tensor from resampled audio
+        *infer_request->input_tensor = torch::from_blob(resampled_data,
+                                           {1, resampled_nb_samples},
+                                           torch::kFloat32).clone();
+        
+        if (infer_request->input_tensor->device() != device) 
+            *infer_request->input_tensor = infer_request->input_tensor->to(device);
+        
+        av_freep(&resampled_data);
+        return 0;
+        
+    } catch (const c10::Error& e) {
+        av_freep(&resampled_data);
+        av_log(ctx, AV_LOG_ERROR, "Audio encoding error: %s\n", e.what());
+        return AVERROR(EINVAL);
+    }
 }
 
 int encode_image_clip(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device& device, bool preprocessing) {
@@ -289,6 +400,62 @@ int encode_text_clip(const THModel *th_model, const THRequestItem *request, cons
         return 0;
     } catch (const c10::Error& e) {
         av_log(ctx, AV_LOG_ERROR, "Text encoding error: %s\n", e.what());
+        return AVERROR(EINVAL);
+    }
+}
+
+int forward_clap(const THModel *th_model, const THRequestItem *request, const c10::Device& device)
+{
+    THInferRequest *infer_request = request->infer_request;
+    DnnContext *ctx = th_model->ctx;
+    THClipContext *clip_ctx = th_model->clip_ctx;
+    infer_request->text_embeddings = new std::vector<torch::Tensor>();
+    int ret;
+
+    ret = encode_audio_clap(th_model, request, device);
+    if (ret < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Audio encoding failed in CLAP preprocessing\n");
+        return ret;
+    }
+
+    try {
+        // Store all similarity results for each label
+        std::vector<torch::Tensor> similarities;
+        
+        for (const auto& label : clip_ctx->labels) {
+            torch::Tensor tokens = get_tokens(th_model, label);
+
+            if (tokens.device() != device) 
+                tokens = tokens.to(device);
+            
+            // Create attention mask (all ones to match the model expectation)
+            torch::Tensor attention_mask = torch::ones({1, tokens.size(1)}, torch::kInt64).to(device);
+            av_log(ctx, AV_LOG_INFO, "About to call forward with tensor shapes: audio=[%ld, %ld], tokens=[%ld, %ld], mask=[%ld, %ld]\n",
+               infer_request->input_tensor->size(0), infer_request->input_tensor->size(1),
+               tokens.size(0), tokens.size(1),
+               attention_mask.size(0), attention_mask.size(1));
+            std::vector<torch::jit::IValue> inputs;
+            inputs.push_back(*infer_request->input_tensor);  // audio
+            inputs.push_back(tokens);                        // input_ids
+            inputs.push_back(attention_mask);                // attention_mask instead of zeros
+            
+            // Run the model and store the result
+            auto similarity = th_model->jit_model->forward(inputs).toTensor();
+            similarities.push_back(similarity);
+        }
+        
+        // Create a tensor with all similarities and assign to output
+        if (!similarities.empty()) {
+            auto all_similarities = torch::cat(similarities, 1);
+            *infer_request->output = torch::Tensor(all_similarities);
+        } else {
+            av_log(ctx, AV_LOG_ERROR, "No similarity results computed\n");
+            return AVERROR(EINVAL);
+        }
+        
+        return 0;
+    } catch (const c10::Error& e) {
+        av_log(ctx, AV_LOG_ERROR, "CLAP forward error: %s\n", e.what());
         return AVERROR(EINVAL);
     }
 }

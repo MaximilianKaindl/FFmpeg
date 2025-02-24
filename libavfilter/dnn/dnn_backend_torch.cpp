@@ -43,6 +43,7 @@ static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Q
 
     switch(func_type){
     case DFT_PROCESS_FRAME:
+    case DFT_ANALYTICS_CLAP:
     {
         LastLevelTaskItem *lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
         if (!lltask) {
@@ -236,6 +237,21 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     infer_request->input_tensor = new torch::Tensor();
     infer_request->output = new torch::Tensor();
 
+    if(th_model->model.func_type == DFT_ANALYTICS_CLAP){
+        lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
+        if (!lltask) {
+            return -1;
+        }
+        request->lltasks[request->lltask_count++] = lltask;
+        task = lltask->task;
+        ret = create_tokenizer(th_model, th_model->clip_ctx->tokenizer_path);
+        if(ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "Error creating tokenizer\n");
+            return ret;
+        }
+        return 0;
+    }
+
     while (ff_queue_size(th_model->lltask_queue) != 0) {
         lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
         if (!lltask) {
@@ -353,6 +369,13 @@ static int th_start_inference(void *args)
     #if (CONFIG_LIBTOKENIZERS == 1)
     if (th_model->is_clip_model) {
         int ret = forward_clip(th_model,request,device);
+        if(ret < 0){
+            return ret;
+        }
+        return 0;
+    }
+    else if (th_model->is_clap_model) {
+        int ret = forward_clap(th_model,request,device);
         if(ret < 0){
             return ret;
         }
@@ -635,7 +658,7 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         #if (CONFIG_LIBTOKENIZERS == 1)
         th_model->is_clip_model = false;
         // Check if this is a CLIP model and initialize accordingly
-        if (func_type == DFT_ANALYTICS_CLIP && init_clip_model(th_model,filter_ctx, device) > 0) {
+        if ((func_type == DFT_ANALYTICS_CLIP || func_type == DFT_ANALYTICS_CLAP) && init_clip_model(th_model,func_type,filter_ctx, device) > 0) {
             goto fail;
         }
         #endif
@@ -751,7 +774,7 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
     request->lltask_count = 0;
 
     #if (CONFIG_LIBTOKENIZERS == 1)
-    if(model->func_type == DFT_ANALYTICS_CLIP) {
+    if(model->func_type == DFT_ANALYTICS_CLIP || model->func_type == DFT_ANALYTICS_CLAP) {
         DNNExecZeroShotClassificationParams *params = (DNNExecZeroShotClassificationParams *) exec_params;
         ret = set_params_clip(th_model, params->labels, params->label_count, params->tokenizer_path);
         if (ret < 0) {

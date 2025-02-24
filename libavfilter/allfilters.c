@@ -114,6 +114,7 @@ extern const FFFilter ff_af_biquad;
 extern const FFFilter ff_af_bs2b;
 extern const FFFilter ff_af_channelmap;
 extern const FFFilter ff_af_channelsplit;
+extern const FFFilter ff_af_dnn_clap;
 extern const FFFilter ff_af_chorus;
 extern const FFFilter ff_af_compand;
 extern const FFFilter ff_af_compensationdelay;
