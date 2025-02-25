@@ -26,189 +26,552 @@
  #include "libavutil/file_open.h"
  #include "libavutil/avstring.h"
  #include "libavutil/fifo.h"
- 
- 
+ #include "dnn/dnn_labels.h"
  typedef struct DNNCLAPContext
  {
      const AVClass *class;
      DnnContext dnnctx;
      float confidence;
      char *labels_filename;
+     char *categories_filename;
      char *tokenizer_path;
      char *target;
-     char **labels;
-     int label_count;
+     
+     // Reuse label structures from dnn_labels.h
+     LabelContext *label_classification_ctx;
+     CategoryClassifcationContext *category_classification_ctx;
+     
+     // For scaling and temperature
+     float logit_scale;
+     float temperature;
      
      // For 5-second frame handling
-     AVFifo *frame_fifo;        // FIFO to store audio frames
      int sample_rate;           // Audio sample rate
-     int64_t buffered_samples;  // Total number of samples buffered
      int64_t samples_per_frame; // Number of samples in a 5-second frame
  } DNNCLAPContext;
+
+#define OFFSET(x) offsetof(DNNCLAPContext, dnnctx.x)
+#define OFFSET2(x) offsetof(DNNCLAPContext, x)
+#define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_AUDIO_PARAM
+
+static const AVOption dnn_clap_options[] = {
+    { "dnn_backend", "DNN backend", 
+        OFFSET(backend_type), AV_OPT_TYPE_INT, 
+        { .i64 = DNN_TH }, INT_MIN, INT_MAX, FLAGS, .unit = "backend" },
+#if (CONFIG_LIBTORCH == 1)
+    { "torch", "torch backend flag", 
+        0, AV_OPT_TYPE_CONST, { .i64 = DNN_TH }, 0, 0, FLAGS, .unit = "backend" },
+#endif
+    {"model", "path to model file", OFFSET(model_filename), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
+    {"confidence", "confidence threshold", OFFSET2(confidence), AV_OPT_TYPE_FLOAT, {.dbl = 0.5}, 0, 1, FLAGS},
+    {"labels", "path to labels file", OFFSET2(labels_filename), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
+    {"categories", "path to categories file", OFFSET2(categories_filename), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
+    {"tokenizer", "path to tokenizer file", OFFSET2(tokenizer_path), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
+    {"logit_scale", "logit scale for CLAP", OFFSET2(logit_scale), AV_OPT_TYPE_FLOAT, {.dbl = 4.6052}, 0, 100.0, FLAGS},
+    {"temperature", "softmax temperature for CLAP", OFFSET2(temperature), AV_OPT_TYPE_FLOAT, {.dbl = 1.0}, 0, 100.0, FLAGS},
+    {NULL}
+};
+
+AVFILTER_DNN_DEFINE_CLASS(dnn_clap, DNN_TH);
+
+static AVDetectionBBox *clap_find_or_create_detection_bbox(AVFrame *frame, uint32_t bbox_index, AVFilterContext *filter_ctx) {
+    DNNCLAPContext *ctx = filter_ctx->priv;
+    AVFrameSideData *sd;
+    AVDetectionBBoxHeader *header;
+    AVDetectionBBox *bbox;
+
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
+    if (!sd) {
+        header = av_detection_bbox_create_side_data(frame, 1);
+        if (!header) {
+            av_log(filter_ctx, AV_LOG_ERROR, "Cannot get side data in CLAP labels processing\n");
+            return NULL;
+        }
+    } else {
+        header = (AVDetectionBBoxHeader *)sd->data;
+    }
+
+    if (bbox_index == 0) {
+        av_strlcat(header->source, ", ", sizeof(header->source));
+        av_strlcat(header->source, ctx->dnnctx.model_filename, sizeof(header->source));
+    }
+    
+    // Get bbox for current index
+    bbox = av_get_detection_bbox(header, bbox_index);
+    if (!bbox) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", bbox_index);
+        return NULL;
+    }
+
+    return bbox;
+}
+
+// Utility function to set probability and label of bbox
+static int clap_set_prob_and_label_of_bbox(AVDetectionBBox *bbox, char *label, int index, float probability) {
+    // Validate parameters
+    if (!bbox || !label) {
+        av_log(NULL, AV_LOG_ERROR, "Invalid parameters in set_prob_and_label_of_bbox\n");
+        return AVERROR(EINVAL);
+    }
+
+    // Check index bounds
+    if (index < 0 || index >= AV_NUM_DETECTION_BBOX_CLASSIFY) {
+        av_log(NULL, AV_LOG_ERROR, "Invalid index %d in set_prob_and_label_of_bbox\n", index);
+        return AVERROR(EINVAL);
+    }
+
+    // Set probability
+    bbox->classify_confidences[index] = av_make_q((int)(probability * 10000), 10000);
+
+    // Copy label with size checking
+    if (av_strlcpy(bbox->classify_labels[index], label, 
+                   AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) >= AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) {
+        av_log(NULL, AV_LOG_WARNING, "Label truncated in set_prob_and_label_of_bbox\n");
+    }
+
+    av_log(NULL, AV_LOG_DEBUG, "Set bbox label: %s with probability: %f at index: %d\n", 
+           bbox->classify_labels[index], probability, index);
+    
+    return 0;
+}
+
+// Fill bbox with best labels
+static int clap_fill_bbox_with_best_labels(DNNCLAPContext *ctx, char **labels, float* probabilities, 
+    int num_labels, AVDetectionBBox *bbox, 
+    int max_classes_per_box, float confidence_threshold) {
+    int i, j, minpos, ret;
+    float min;
+
+    if (!labels || !probabilities || !bbox) {
+        return AVERROR(EINVAL);
+    }
+
+    for (i = 0; i < num_labels; i++) {
+        if (probabilities[i] >= confidence_threshold) {
+            if (bbox->classify_count >= max_classes_per_box) {
+                // Find lowest probability classification
+                min = av_q2d(bbox->classify_confidences[0]);
+                minpos = 0;
+                for (j = 1; j < bbox->classify_count; j++) {
+                    float prob = av_q2d(bbox->classify_confidences[j]);
+                    if (prob < min) {
+                        min = prob;
+                        minpos = j;
+                    }
+                }
+
+                if (probabilities[i] > min) {
+                    ret = clap_set_prob_and_label_of_bbox(bbox, labels[i], minpos, probabilities[i]);
+                    if (ret < 0)
+                        return ret;
+                }
+            } else {
+                ret = clap_set_prob_and_label_of_bbox(bbox, labels[i], bbox->classify_count, probabilities[i]);
+                if (ret < 0)
+                    return ret;
+                bbox->classify_count++;
+            }
+        }
+    }
+    return 0;
+}
+
+// Apply softmax to array of probabilities
+static int clap_softmax(float *input, size_t input_len, float logit_scale, float temperature, AVFilterContext *ctx) 
+{
+    float sum, offset, m;
+
+    if (!input || input_len == 0) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid input to softmax\n");
+        return AVERROR(EINVAL);
+    }
  
- #define OFFSET(x) offsetof(DNNCLAPContext, dnnctx.x)
- #define OFFSET2(x) offsetof(DNNCLAPContext, x)
- #define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_AUDIO_PARAM
- 
- static const AVOption dnn_clap_options[] = {
-     { "dnn_backend", "DNN backend", 
-         OFFSET(backend_type), AV_OPT_TYPE_INT, 
-         { .i64 = DNN_TH }, INT_MIN, INT_MAX, FLAGS, .unit = "backend" },
- #if (CONFIG_LIBTORCH == 1)
-     { "torch", "torch backend flag", 
-         0, AV_OPT_TYPE_CONST, { .i64 = DNN_TH }, 0, 0, FLAGS, .unit = "backend" },
- #endif
-     {"model", "path to model file", OFFSET(model_filename), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
-     {"confidence", "confidence threshold", OFFSET2(confidence), AV_OPT_TYPE_FLOAT, {.dbl = 0.5}, 0, 1, FLAGS},
-     {"labels", "path to labels file", OFFSET2(labels_filename), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
-     {"tokenizer", "path to tokenizer file", OFFSET2(tokenizer_path), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
-     {NULL}};
- 
- AVFILTER_DNN_DEFINE_CLASS(dnn_clap, DNN_TH);
- 
- static int dnn_clap_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
- {
-     DNNCLAPContext *ctx = filter_ctx->priv;
-     const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
-     int num_labels = ctx->label_count;
-     float *probabilities = (float *)output->data;
-     int num_bboxes;
-     AVFrameSideData *sd;
-     AVDetectionBBoxHeader *header;
-     AVDetectionBBox *bbox;
-     int i, j;
-     int start_idx, end_idx;
-     int percentage;
- 
-     // Calculate number of bounding boxes needed
-     num_bboxes = (num_labels + max_classes_per_box - 1) / max_classes_per_box;
- 
-     sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-     if (sd != NULL)
-     {
-         av_log(filter_ctx, AV_LOG_ERROR, "Found existing Clip BBox. Box gets replaced ... \n");
-         av_frame_remove_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-     }
- 
-     header = av_detection_bbox_create_side_data(frame, num_bboxes);
-     if (!header)
-     {
-         av_log(filter_ctx, AV_LOG_ERROR, "Failed to allocate side data for clip classification\n");
-         return AVERROR(ENOMEM);
-     }
- 
-     if (bbox_index == 0)
-     {
-         av_strlcat(header->source, ", ", sizeof(header->source));
-         av_strlcat(header->source, ctx->dnnctx.model_filename, sizeof(header->source));
-     }
- 
-     // Process each bbox
-     for (i = 0; i < num_bboxes; i++)
-     {
-         bbox = av_get_detection_bbox(header, i);
-         if (!bbox)
-         {
-             av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", i);
-             return AVERROR(EINVAL);
-         }
- 
-         // Initialize bbox
-         bbox->classify_count = 0;
- 
-         start_idx = i * max_classes_per_box;
-         end_idx = FFMIN(num_labels, (i + 1) * max_classes_per_box);
- 
-         // Set classifications for this bbox
-         for (j = start_idx; j < end_idx && bbox->classify_count < max_classes_per_box; j++)
-         {
-             if (!ctx->labels[j])
-             {
-                 av_log(filter_ctx, AV_LOG_ERROR, "Invalid label at index %d\n", j);
-                 continue;
-             }
- 
-             percentage = (int)(probabilities[j] * 10000);
-             bbox->classify_confidences[bbox->classify_count] = av_make_q(percentage, 10000);
-             av_strlcpy(bbox->classify_labels[bbox->classify_count],
-                        ctx->labels[j],
-                        AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
-             bbox->classify_count++;
-         }
-     }
- 
-     return 0;
- }
- 
- // Create a 5-second frame from buffered frames
- static AVFrame *create_5_second_frame(AVFilterContext *filter_ctx)
- {
-     DNNCLAPContext *ctx = filter_ctx->priv;
-     AVFilterLink *inlink = filter_ctx->inputs[0];
-     AVFrame *frame = NULL;
-     AVFrame *outframe = NULL;
-     int64_t total_samples = 0;
-     int channels = inlink->ch_layout.nb_channels;
-     int ret;
- 
-     // Allocate output frame for 5 seconds of audio
-     outframe = ff_get_audio_buffer(inlink, ctx->samples_per_frame);
-     if (!outframe)
-     {
-         av_log(filter_ctx, AV_LOG_ERROR, "Failed to allocate 5-second frame\n");
-         return NULL;
-     }
- 
-     // Transfer all metadata from first frame
-     if (av_fifo_peek(ctx->frame_fifo, 0, &frame, 1) >= 0 && frame)
-     {
-         ret = av_frame_copy_props(outframe, frame);
-         if (ret < 0)
-         {
-             av_frame_free(&outframe);
-             return NULL;
-         }
-     }
- 
-     // Fill the 5-second frame from the FIFO
-     while (total_samples < ctx->samples_per_frame)
-     {
-         int frame_samples;
-         int copy_samples;
- 
-         if (av_fifo_read(ctx->frame_fifo, &frame, 1) < 0)
-             break;
- 
-         if (!frame)
-             break;
- 
-         frame_samples = frame->nb_samples;
-         copy_samples = FFMIN(frame_samples, ctx->samples_per_frame - total_samples);
- 
-         // Copy samples for each channel
-         for (int ch = 0; ch < channels; ch++)
-         {
-             memcpy((float *)outframe->data[ch] + total_samples,
-                    (float *)frame->data[ch],
-                    copy_samples * sizeof(float));
-         }
- 
-         total_samples += copy_samples;
-         
-         // Update pts and duration
-         outframe->pts = frame->pts;
-         
-         av_frame_free(&frame);
-     }
- 
-     // Set the actual number of samples in the frame
-     outframe->nb_samples = total_samples;
-     ctx->buffered_samples -= total_samples;
+    if (temperature <= 0.0f) {
+        temperature = 1.0f;
+    }
      
-     return outframe;
- }
+    // Apply logit scale
+    for (size_t i = 0; i < input_len; i++) {
+        input[i] *= logit_scale;
+    }
  
- static int dnn_clip_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
+    // Find maximum value for numerical stability
+    m = input[0];
+    for (size_t i = 1; i < input_len; i++) {
+        if (input[i] > m) {
+            m = input[i];
+        }
+    }
+ 
+    // Calculate sum of exponentials
+    sum = 0.0f;
+    for (size_t i = 0; i < input_len; i++) {
+        sum += expf((input[i] - m) / temperature);
+    }
+ 
+    if (sum == 0.0f) {
+        av_log(ctx, AV_LOG_ERROR, "Division by zero in softmax\n");
+        return AVERROR(EINVAL);
+    }
+ 
+    // Calculate softmax values
+    offset = m + temperature * logf(sum);
+    for (size_t i = 0; i < input_len; i++) {
+        input[i] = expf((input[i] - offset) / temperature);
+    }
+ 
+    return 0;
+}
+
+// Process labels with softmax
+static int clap_post_proc_labels(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
+{
+    DNNCLAPContext *ctx = filter_ctx->priv;
+    const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
+    float *probabilities = (float *)output->data;
+    int num_labels = ctx->label_classification_ctx->label_count;
+    AVDetectionBBox *bbox;
+    float confidence_threshold = ctx->confidence;
+    int ret;
+
+    // Apply softmax to probabilities
+    if (clap_softmax(probabilities, num_labels, ctx->logit_scale, ctx->temperature, filter_ctx) < 0) {
+        return AVERROR(EINVAL);
+    }
+
+    // Get or create detection bbox 
+    bbox = clap_find_or_create_detection_bbox(frame, bbox_index, filter_ctx);
+    if (!bbox) {
+        return AVERROR(EINVAL);
+    }    
+
+    // Fill bbox with best labels
+    ret = clap_fill_bbox_with_best_labels(ctx, ctx->label_classification_ctx->labels, 
+                                          probabilities, num_labels, bbox, 
+                                          max_classes_per_box, confidence_threshold);
+    if (ret < 0) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to fill bbox with best labels\n");
+        return ret;
+    }
+    
+    return 0;
+}
+
+// Apply softmax to each category group separately
+static int clap_softmax_over_all_categories(DNNCLAPContext *ctx, AVFilterContext *filter_ctx, float* probabilities) {
+    int prob_offset = 0;
+    CategoryClassifcationContext *cat_class_ctx = ctx->category_classification_ctx;
+
+    for (int c = 0; c < cat_class_ctx->num_contexts; c++) {
+        CategoriesContext *categories_ctx = cat_class_ctx->category_units[c];
+        if (!categories_ctx) {
+            av_log(filter_ctx, AV_LOG_ERROR, "Missing classification data at context %d\n", c);
+            continue;
+        }
+        // Apply softmax only to the labels within this category
+        if (clap_softmax(probabilities + prob_offset,
+                        categories_ctx->label_count,
+                        ctx->logit_scale, 
+                        ctx->temperature,
+                        filter_ctx) < 0) {
+            return AVERROR(EINVAL);
+        }
+        prob_offset += categories_ctx->label_count;
+    }
+    return 0;
+}
+
+// Find the best category based on summed probabilities
+static CategoryContext *clap_get_best_category(CategoriesContext *categories_ctx, float* probabilities) {
+    CategoryContext *best_category = NULL;
+    float best_probability = -1.0f;
+    int prob_offset = 0;
+    
+    // Calculate total probability for each category
+    for (int cat_idx = 0; cat_idx < categories_ctx->category_count; cat_idx++) {
+        CategoryContext *category = &categories_ctx->categories[cat_idx];
+        
+        // Sum probabilities for all labels in this category
+        category->total_probability = 0.0f;
+        for (int label_idx = 0; label_idx < category->label_count; label_idx++) {
+            category->total_probability += probabilities[prob_offset + label_idx];
+        }
+        
+        if (category->total_probability > best_probability) {
+            best_probability = category->total_probability;
+            best_category = category;
+        }
+        
+        prob_offset += category->label_count;
+    }
+    
+    return best_category;
+}
+
+static int clap_post_proc_categories(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
+{
+    DNNCLAPContext *ctx = filter_ctx->priv;
+    CategoryClassifcationContext *cat_class_ctx = ctx->category_classification_ctx;
+    CategoryContext *best_category;
+    float *probabilities = output->data;
+    int ret, prob_offset = 0;
+    char **ctx_labels;
+    float *ctx_probabilities;
+
+    // Validate input data
+    if (!probabilities || !cat_class_ctx) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Invalid input data\n");
+        return AVERROR(EINVAL);
+    }
+
+    // Apply softmax transformation
+    ret = clap_softmax_over_all_categories(ctx, filter_ctx, probabilities);
+    if (ret < 0) {
+        return ret;
+    }
+
+    // Get or create detection bbox 
+    AVDetectionBBox *bbox = clap_find_or_create_detection_bbox(frame, bbox_index, filter_ctx);
+    if (!bbox) {
+        return AVERROR(EINVAL);
+    }   
+
+    // Allocate temporary arrays
+    ctx_labels = av_malloc_array(cat_class_ctx->num_contexts, sizeof(char *));
+    if (!ctx_labels) {
+        return AVERROR(ENOMEM);
+    }
+    
+    for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
+        ctx_labels[i] = av_mallocz(AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+        if (!ctx_labels[i]) {
+            // Clean up previously allocated memory
+            for (int j = 0; j < i; j++) {
+                av_freep(&ctx_labels[j]);
+            }
+            av_freep(&ctx_labels);
+            return AVERROR(ENOMEM);
+        }
+    }
+
+    ctx_probabilities = av_malloc_array(cat_class_ctx->num_contexts, sizeof(float));
+    if (!ctx_probabilities) {
+        // Clean up
+        for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
+            av_freep(&ctx_labels[i]);
+        }
+        av_freep(&ctx_labels);
+        return AVERROR(ENOMEM);
+    }
+
+    // Process each context
+    for (int ctx_idx = 0; ctx_idx < cat_class_ctx->num_contexts; ctx_idx++) {
+        CategoriesContext *categories_ctx = cat_class_ctx->category_units[ctx_idx];
+        if (!categories_ctx) {
+            av_log(filter_ctx, AV_LOG_ERROR, "Missing classification data at context %d\n", ctx_idx);
+            continue;
+        }
+
+        // Find best category
+        best_category = clap_get_best_category(categories_ctx, probabilities + prob_offset);
+        if (!best_category || !best_category->name) {
+            av_log(filter_ctx, AV_LOG_ERROR, "Invalid best category at context %d\n", ctx_idx);
+            continue;
+        }
+
+        // Copy category name instead of assigning pointer
+        av_strlcpy(ctx_labels[ctx_idx], best_category->name, AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+        ctx_probabilities[ctx_idx] = best_category->total_probability;
+        
+        prob_offset += categories_ctx->label_count;
+    }
+
+    // Fill bbox with best labels
+    ret = clap_fill_bbox_with_best_labels(ctx, ctx_labels, ctx_probabilities, 
+                                   cat_class_ctx->num_contexts, bbox,
+                                   AV_NUM_DETECTION_BBOX_CLASSIFY, 
+                                   ctx->confidence);
+
+    // Clean up
+    for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
+        av_freep(&ctx_labels[i]);
+    }
+    av_freep(&ctx_labels);
+    av_freep(&ctx_probabilities);
+
+    return ret;
+}
+
+static int dnn_clap_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
+{
+    DNNCLAPContext *ctx = filter_ctx->priv;
+    
+    if (!frame || !output || !output->data) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Invalid input to CLAP post processing\n");
+        return AVERROR(EINVAL);
+    }
+
+    // Choose post-processing based on which context is available
+    if (ctx->label_classification_ctx) {
+        return clap_post_proc_labels(frame, output, bbox_index, filter_ctx);
+    } else if (ctx->category_classification_ctx) {
+        return clap_post_proc_categories(frame, output, bbox_index, filter_ctx);
+    }
+    
+    av_log(filter_ctx, AV_LOG_ERROR, "No valid CLAP classification context available\n");
+    return AVERROR(EINVAL);
+}
+
+static void free_clap_contexts(DNNCLAPContext *ctx)
+{
+    if (!ctx)
+        return;
+
+    if (ctx->label_classification_ctx) {
+        free_label_context(ctx->label_classification_ctx);
+        av_freep(&ctx->label_classification_ctx);
+    }
+
+    if (ctx->category_classification_ctx) {
+        free_category_classfication_context(ctx->category_classification_ctx);
+        av_freep(&ctx->category_classification_ctx);
+    }
+}
+
+static av_cold int dnn_clap_init(AVFilterContext *context)
+{
+    DNNCLAPContext *ctx = context->priv;
+    int ret;
+
+    // Initialize DNN context for CLAP
+    ret = ff_dnn_init(&ctx->dnnctx, DFT_ANALYTICS_CLAP, context);
+    if (ret < 0)
+        return ret;
+        
+    // Set post-processing function
+    ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_clap_post_proc);
+
+    // Verify input parameters
+    if (!ctx->tokenizer_path) {
+        av_log(context, AV_LOG_ERROR, "Tokenizer file is required for CLAP classification\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (ctx->labels_filename && ctx->categories_filename) {
+        av_log(context, AV_LOG_ERROR, "Labels and categories file cannot be used together\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (!ctx->labels_filename && !ctx->categories_filename) {
+        av_log(context, AV_LOG_ERROR, "Either labels or categories file is required\n");
+        return AVERROR(EINVAL);
+    }
+
+    // Initialize the labels context if labels file is provided
+    if (ctx->labels_filename) {
+        ctx->label_classification_ctx = av_calloc(1, sizeof(LabelContext));
+        if (!ctx->label_classification_ctx)
+            return AVERROR(ENOMEM);
+            
+        ret = read_label_file(context, ctx->label_classification_ctx, ctx->labels_filename, 
+                             AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+        if (ret < 0) {
+            av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
+            return ret;
+        }
+    }
+    // Initialize the categories context if categories file is provided
+    else if (ctx->categories_filename) {
+        ctx->category_classification_ctx = av_calloc(1, sizeof(CategoryClassifcationContext));
+        if (!ctx->category_classification_ctx)
+            return AVERROR(ENOMEM);
+
+        ret = read_categories_file(context, ctx->category_classification_ctx, ctx->categories_filename, 
+                                  AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+        if (ret < 0) {
+            av_log(context, AV_LOG_ERROR, "Failed to read categories file\n");
+            free_clap_contexts(ctx);
+            return ret;
+        }
+    }
+    
+    return 0;
+}
+
+static void dnn_clap_uninit(AVFilterContext *context)
+{
+    DNNCLAPContext *ctx = context->priv;
+
+    // Uninitialize DNN context
+    ff_dnn_uninit(&ctx->dnnctx);
+    
+    // Free label and category contexts
+    free_clap_contexts(ctx);
+}
+
+ // Execute CLAP model with all categories
+static int execute_clap_model_for_all_categories(DNNCLAPContext *ctx, AVFrame *frame) {
+    char **combined_labels = NULL;
+    int combined_idx = 0;
+    int ret;
+    CategoryClassifcationContext *cat_class_ctx = ctx->category_classification_ctx;
+
+    // Allocate array for all labels
+    combined_labels = av_calloc(cat_class_ctx->total_labels, sizeof(char *));
+    if (!combined_labels) {
+        return AVERROR(ENOMEM);
+    }
+    
+    // Combine all labels from all categories
+    for (int c = 0; c < cat_class_ctx->num_contexts; c++) {
+        CategoriesContext *current_ctx = cat_class_ctx->category_units[c];
+        for (int i = 0; i < current_ctx->category_count; i++) {
+            CategoryContext *category = &current_ctx->categories[i];
+            for (int j = 0; j < category->labels->label_count; j++) {
+                combined_labels[combined_idx] = category->labels->labels[j];
+                combined_idx++;
+            }
+        }    
+    }
+    
+    // Execute model with ALL labels combined
+    ret = ff_dnn_execute_model_clip(&ctx->dnnctx, frame, NULL,
+        combined_labels,
+        cat_class_ctx->total_labels,
+        ctx->tokenizer_path,
+        ctx->target
+    );
+
+    av_freep(&combined_labels);
+    return ret;
+}
+
+// Process 5-second audio frame with the appropriate model
+static int process_audio_frame(AVFilterContext *filter_ctx, AVFrame *frame) {
+    DNNCLAPContext *ctx = filter_ctx->priv;
+    int ret;
+    
+    // Choose processing method based on available context
+    if (ctx->label_classification_ctx) {
+        // Process with labels
+        ret = ff_dnn_execute_model_clip(&ctx->dnnctx, frame, NULL,
+            ctx->label_classification_ctx->labels,
+            ctx->label_classification_ctx->label_count,
+            ctx->tokenizer_path,
+            ctx->target
+        );
+    } else if (ctx->category_classification_ctx) {
+        // Process with categories
+        ret = execute_clap_model_for_all_categories(ctx, frame);
+    } else {
+        av_log(filter_ctx, AV_LOG_ERROR, "No classification context available\n");
+        return AVERROR(EINVAL);
+    }
+    
+    return ret;
+}
+ 
+static int dnn_clap_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
  {
      DNNCLAPContext *ctx = outlink->src->priv;
      int ret;
@@ -238,46 +601,6 @@
  
      return 0;
  }
- 
- static int process_buffered_frames(AVFilterContext *filter_ctx)
- {
-     DNNCLAPContext *ctx = filter_ctx->priv;
-     AVFilterLink *outlink = filter_ctx->outputs[0];
-     AVFrame *five_sec_frame;
-     int ret = 0;
- 
-     // Process all complete 5-second frames
-     while (ctx->buffered_samples >= ctx->samples_per_frame)
-     {
-         five_sec_frame = create_5_second_frame(filter_ctx);
-         if (!five_sec_frame)
-             return AVERROR(ENOMEM);
- 
-         if (ff_dnn_execute_model_clip(&ctx->dnnctx, five_sec_frame, NULL, 
-                                       ctx->labels, ctx->label_count, 
-                                       ctx->tokenizer_path, NULL) != 0)
-         {
-             av_frame_free(&five_sec_frame);
-             return AVERROR(EIO);
-         }
-         
-         // Check for processed frames
-         AVFrame *in_frame = NULL;
-         AVFrame *out_frame = NULL;
-         DNNAsyncStatusType async_state;
-         
-         async_state = ff_dnn_get_result(&ctx->dnnctx, &in_frame, &out_frame);
-         if (async_state == DAST_SUCCESS)
-         {
-             ret = ff_filter_frame(outlink, in_frame);
-             if (ret < 0)
-                 return ret;
-         }
-     }
- 
-     return ret;
- }
- 
  static int dnn_clap_activate(AVFilterContext *filter_ctx)
  {
      AVFilterLink *inlink = filter_ctx->inputs[0];
@@ -291,39 +614,25 @@
  
      FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
  
-     do
-     {
-         // Process all available input frames
-         ret = ff_inlink_consume_frame(inlink, &in);
-         if (ret < 0)
+     // Process all available input frames (they should already be 5 seconds each)
+     ret = ff_inlink_consume_frame(inlink, &in);
+     if (ret < 0)
+         return ret;
+     if (ret > 0) {
+         // Process the frame immediately since it should already be 5 seconds
+         ret = process_audio_frame(filter_ctx, in);
+         if (ret != 0) {
+             av_frame_free(&in);
              return ret;
-         if (ret > 0)
-         {
-             // Add frame to buffer
-             if (av_fifo_write(ctx->frame_fifo, &in, 1) < 0)
-             {
-                 av_frame_free(&in);
-                 return AVERROR(ENOMEM);
-             }
-             
-             // Update buffered samples count
-             ctx->buffered_samples += in->nb_samples;
-             
-             // Process buffered frames if we have 5 seconds of audio
-             ret = process_buffered_frames(filter_ctx);
-             if (ret < 0)
-                 return ret;
          }
-     } while (ret > 0);
+     }
  
      // Handle processed frames
-     do
-     {
+     do {
          AVFrame *in_frame = NULL;
          AVFrame *out_frame = NULL;
          async_state = ff_dnn_get_result(&ctx->dnnctx, &in_frame, &out_frame);
-         if (async_state == DAST_SUCCESS)
-         {
+         if (async_state == DAST_SUCCESS) {
              ret = ff_filter_frame(outlink, in_frame);
              if (ret < 0)
                  return ret;
@@ -335,33 +644,11 @@
      if (got_frame)
          return 0;
  
-     if (ff_inlink_acknowledge_status(inlink, &status, &pts))
-     {
-         if (status == AVERROR_EOF)
-         {
-             // Process any remaining frames in the buffer if they make up at least 80% of a 5-second frame
-             if (ctx->buffered_samples >= ctx->samples_per_frame * 0.8)
-             {
-                 AVFrame *five_sec_frame = create_5_second_frame(filter_ctx);
-                 if (five_sec_frame)
-                 {
-                     if (ff_dnn_execute_model_clip(&ctx->dnnctx, five_sec_frame, NULL, 
-                                                  ctx->labels, ctx->label_count, 
-                                                  ctx->tokenizer_path, NULL) == 0)
-                     {
-                         // Wait for processing to finish
-                         av_usleep(5000);
-                     }
-                     else
-                     {
-                         av_frame_free(&five_sec_frame);
-                     }
-                 }
-             }
-             
+     if (ff_inlink_acknowledge_status(inlink, &status, &pts)) {
+         if (status == AVERROR_EOF) {
              // Flush remaining frames
              int64_t out_pts = pts;
-             ret = dnn_clip_flush_frame(outlink, pts, &out_pts);
+             ret = dnn_clap_flush_frame(outlink, pts, &out_pts);
              ff_outlink_set_status(outlink, status, out_pts);
              return ret;
          }
@@ -371,164 +658,41 @@
  
      return 0;
  }
- 
- static int read_classify_label_file(AVFilterContext *context)
+
+ static int dnn_clap_config_input(AVFilterLink *inlink)
  {
-     int line_len;
-     FILE *file;
-     DNNCLAPContext *ctx = context->priv;
- 
-     file = avpriv_fopen_utf8(ctx->labels_filename, "r");
-     if (!file)
-     {
-         av_log(context, AV_LOG_ERROR, "Failed to open file %s\n", ctx->labels_filename);
-         return AVERROR(EINVAL);
-     }
- 
-     while (!feof(file))
-     {
-         char *prompt;
-         char buf[256];
-         if (!fgets(buf, sizeof(buf), file))
-             break;
- 
-         line_len = strlen(buf);
-         while (line_len)
-         {
-             int i = line_len - 1;
-             if (buf[i] == '\n' || buf[i] == '\r' || buf[i] == ' ')
-             {
-                 buf[i] = '\0';
-                 line_len--;
-             }
-             else
-                 break;
-         }
- 
-         if (line_len == 0)
-             continue;
- 
-         if (line_len > AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE)
-         {
-             av_log(context, AV_LOG_ERROR, "Text prompt %s too long\n", buf);
-             fclose(file);
-             return AVERROR(EINVAL);
-         }
- 
-         prompt = av_strdup(buf);
-         if (!prompt)
-         {
-             av_log(context, AV_LOG_ERROR, "Failed to allocate memory for prompt %s\n", buf);
-             fclose(file);
-             return AVERROR(ENOMEM);
-         }
- 
-         if (av_dynarray_add_nofree(&ctx->labels, &ctx->label_count, prompt) < 0)
-         {
-             av_log(context, AV_LOG_ERROR, "Failed to add prompt to array\n");
-             fclose(file);
-             av_freep(&prompt);
-             return AVERROR(ENOMEM);
-         }
-     }
- 
-     fclose(file);
-     return 0;
- }
- 
- static void free_classify_labels(DNNCLAPContext *ctx)
- {
-     for (int i = 0; i < ctx->label_count; i++)
-         av_freep(&ctx->labels[i]);
-     ctx->label_count = 0;
-     av_freep(&ctx->labels);
- }
- 
- static int config_input(AVFilterLink *inlink)
- {
-     AVFilterContext *ctx = inlink->dst;
-     DNNCLAPContext *s = ctx->priv;
+     AVFilterContext *filter_ctx = inlink->dst;
+     DNNCLAPContext *ctx = filter_ctx->priv;
      
-     // Initialize sample rate and calculate samples for 5 seconds
-     s->sample_rate = inlink->sample_rate;
-     s->samples_per_frame = 5 * s->sample_rate; // 5 seconds * sample_rate
-     
-     av_log(ctx, AV_LOG_INFO, "Configured CLAP filter for 5-second frames: %d samples at %d Hz\n", 
-            (int)s->samples_per_frame, s->sample_rate);
+     ctx->sample_rate = inlink->sample_rate;
+     ctx->samples_per_frame = ctx->sample_rate * 7; 
+     // Set min/max samples using the proper internal API
+     ff_filter_link(inlink)->min_samples = ctx->samples_per_frame;
+     ff_filter_link(inlink)->max_samples = ctx->samples_per_frame;
      
      return 0;
  }
- 
- static av_cold int dnn_clap_init(AVFilterContext *context)
- {
-     DNNCLAPContext *ctx = context->priv;
-     int ret;
- 
-     ret = ff_dnn_init(&ctx->dnnctx, DFT_ANALYTICS_CLAP, context);
-     if (ret < 0)
-         return ret;
-     ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_clap_post_proc);
-     if (!ctx->labels_filename)
-     {
-         av_log(context, AV_LOG_ERROR, "Text prompts file is required for CLIP classification\n");
-         return AVERROR(EINVAL);
-     }
-     if (!ctx->tokenizer_path)
-     {
-         av_log(context, AV_LOG_ERROR, "Tokenizer file is required\n");
-         return AVERROR(EINVAL);
-     }
-     
-     // Initialize frame buffer
-     ctx->frame_fifo = av_fifo_alloc2(64, sizeof(AVFrame*), AV_FIFO_FLAG_AUTO_GROW);
-     if (!ctx->frame_fifo)
-     {
-         av_log(context, AV_LOG_ERROR, "Failed to allocate frame FIFO\n");
-         return AVERROR(ENOMEM);
-     }
-     
-     ctx->buffered_samples = 0;
-     
-     return read_classify_label_file(context);
- }
- 
- static void dnn_clap_uninit(AVFilterContext *context)
- {
-     DNNCLAPContext *ctx = context->priv;
-     AVFrame *frame;
- 
-     ff_dnn_uninit(&ctx->dnnctx);
-     free_classify_labels(ctx);
-     
-     // Free any remaining frames in the FIFO
-     if (ctx->frame_fifo)
-     {
-         while (av_fifo_read(ctx->frame_fifo, &frame, 1) >= 0 && frame)
-             av_frame_free(&frame);
-         
-         av_fifo_freep2(&ctx->frame_fifo);
-     }
- }
- 
- static const AVFilterPad dnn_clap_inputs[] = {
-     {
-         .name         = "default",
-         .type         = AVMEDIA_TYPE_AUDIO,
-         .config_props = config_input,
-     },
- };
- 
- const FFFilter ff_af_dnn_clap = {
-     .p.name = "dnn_clap",
-     .p.description = NULL_IF_CONFIG_SMALL("Apply CLAP (Contrastive Language-Audio Pretraining) filter."),
-     .p.priv_class = &dnn_clap_class,
-     .p.flags = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
-     .priv_size = sizeof(DNNCLAPContext),
-     .preinit = ff_dnn_filter_init_child_class,
-     .init = dnn_clap_init,
-     .uninit = dnn_clap_uninit,
-     .activate = dnn_clap_activate,
-     FILTER_INPUTS(dnn_clap_inputs),
-     FILTER_OUTPUTS(ff_audio_default_filterpad),
-     FILTER_SAMPLEFMTS_ARRAY(ff_all_formats),
- };
+static const AVFilterPad dnn_clap_inputs[] = {
+    {
+        .name         = "default",
+        .type         = AVMEDIA_TYPE_AUDIO,
+        .config_props = dnn_clap_config_input
+    }
+};
+
+static const enum AVSampleFormat sample_fmts[] = { AV_SAMPLE_FMT_FLT, -1 };
+
+const FFFilter ff_af_dnn_clap = {
+    .p.name = "dnn_clap",
+    .p.description = NULL_IF_CONFIG_SMALL("Apply CLAP (Contrastive Language-Audio Pretraining) filter."),
+    .p.priv_class = &dnn_clap_class,
+    .p.flags = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
+    .priv_size = sizeof(DNNCLAPContext),
+    .preinit = ff_dnn_filter_init_child_class,
+    .init = dnn_clap_init,
+    .uninit = dnn_clap_uninit,
+    .activate = dnn_clap_activate,
+    FILTER_INPUTS(dnn_clap_inputs),
+    FILTER_OUTPUTS(ff_audio_default_filterpad),
+    FILTER_SAMPLEFMTS_ARRAY(sample_fmts)
+};
