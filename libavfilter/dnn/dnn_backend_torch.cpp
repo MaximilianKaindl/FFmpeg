@@ -52,6 +52,7 @@ static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Q
         }
         task->inference_todo = 1;
         task->inference_done = 0;
+        lltask->bbox_index = 0;
         lltask->task = task;
         if (ff_queue_push_back(lltask_queue, lltask) < 0) {
             av_log(ctx, AV_LOG_ERROR, "Failed to push back lltask_queue.\n");
