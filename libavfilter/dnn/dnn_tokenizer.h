@@ -16,104 +16,83 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+/**
+ * @file
+ * C interface for tokenizer handling using the tokenizers_c API
+ */
+
  #ifndef AVFILTER_DNN_DNN_TOKENIZER_H
  #define AVFILTER_DNN_DNN_TOKENIZER_H
  
- #include <string>
- #include <memory>
- #include <vector>
- #include <utility> // for std::pair
- #include <stdexcept> // Added for std::runtime_error
-
+ #include <stddef.h>
+ #include <stdint.h>
+ #include "tokenizers_c.h"
+ 
+ #ifdef __cplusplus
  extern "C" {
- #include "libavutil/log.h"
- }
- 
- #include <tokenizers_cpp.h>
- 
- using tokenizers::Tokenizer;
- 
- // Tokenizer constants
- extern const std::string START_TOKEN;
- extern const std::string END_TOKEN;
- extern const int32_t PADDING_TOKEN;
- extern const int DEFAULT_MAX_LENGTH;
+ #endif
  
  /**
-  * Load data from a file.
+  * Load bytes from a file into memory.
   * 
-  * @param path The file path.
-  * @param data Output parameter to store the file content.
-  * @param log_ctx Context for logging.
+  * @param path      The file path.
+  * @param data      Output parameter for the loaded data.
+  * @param data_size Output parameter for the data size.
+  * @param log_ctx   Context for logging.
   * @return 0 on success, error code on failure.
   */
- int load_bytes_from_file(const std::string& path, std::string& data, void* log_ctx);
+ int load_bytes_from_file(const char *path, char **data, size_t *data_size, void *log_ctx);
  
  /**
   * Create a tokenizer from a tokenizer file.
   * 
   * @param tokenizer_path Path to the tokenizer file.
-  * @param log_ctx Context for logging.
-  * @return Unique pointer to the created tokenizer, or nullptr on failure.
+  * @param log_ctx        Context for logging.
+  * @return Handle to the created tokenizer, or NULL on failure.
   */
- std::unique_ptr<Tokenizer> create_tokenizer(const std::string& tokenizer_path, void* log_ctx);
+ TokenizerHandle create_tokenizer(const char *tokenizer_path, void *log_ctx);
  
  /**
-  * Tokenize a text prompt using raw pointer.
+  * Tokenize a text prompt with special tokens automatically handled by the tokenizer.
+  * The function allocates memory for the token IDs which should be freed by the caller.
   * 
-  * @param tokenizer Pointer to the tokenizer.
-  * @param prompt The text prompt to tokenize.
-  * @param max_length Maximum length of token sequence (including special tokens).
-  * @param log_ctx Context for logging.
-  * @return Vector of token IDs.
+  * @param tokenizer  Pointer to the tokenizer.
+  * @param prompt     The text prompt to tokenize.
+  * @param token_ids  Output parameter for the dynamically allocated token ID array.
+  * @param n_tokens   Output parameter for the number of tokens.
+  * @param log_ctx    Context for logging.
+  * @return 0 on success, error code on failure.
   */
- std::vector<int64_t> get_tokens(Tokenizer* tokenizer, 
-                                const std::string& prompt, 
-                                int max_length = DEFAULT_MAX_LENGTH,
-                                void* log_ctx = nullptr);
+ int tokenize_text(TokenizerHandle tokenizer, const char *prompt, int target_length,
+                  int **token_ids, int *n_tokens, void *log_ctx);
  
  /**
-  * Tokenize a text prompt using unique_ptr.
+  * Tokenize a text prompt and return attention mask along with tokens.
+  * Special tokens are handled automatically by the tokenizer.
+  * The function allocates memory for both token IDs and attention mask 
+  * which should be freed by the caller.
   * 
-  * @param tokenizer Reference to unique_ptr of the tokenizer.
-  * @param prompt The text prompt to tokenize.
-  * @param max_length Maximum length of token sequence (including special tokens).
-  * @param log_ctx Context for logging.
-  * @return Vector of token IDs.
+  * @param tokenizer      Pointer to the tokenizer.
+  * @param prompt         The text prompt to tokenize.
+  * @param token_ids      Output parameter for the dynamically allocated token ID array.
+  * @param attention_mask Output parameter for the dynamically allocated attention mask array.
+  * @param n_tokens       Output parameter for the number of tokens.
+  * @param log_ctx        Context for logging.
+  * @return 0 on success, error code on failure.
   */
- std::vector<int64_t> get_tokens(const std::unique_ptr<Tokenizer>& tokenizer, 
-                                const std::string& prompt, 
-                                int max_length = DEFAULT_MAX_LENGTH,
-                                void* log_ctx = nullptr);
+ int tokenize_text_with_mask(TokenizerHandle tokenizer, const char *prompt, int target_length,
+                            int **token_ids, int **attention_mask, 
+                            int *n_tokens, void *log_ctx);
  
  /**
-  * Tokenize a text prompt and return attention mask using raw pointer.
+  * Free tokenizer resources.
   * 
-  * @param tokenizer Pointer to the tokenizer.
-  * @param prompt The text prompt to tokenize.
-  * @param max_length Maximum length of token sequence (including special tokens).
-  * @param log_ctx Context for logging.
-  * @return Pair of vectors: first is token IDs, second is attention mask (1 for tokens, 0 for padding).
+  * @param tokenizer Handle to the tokenizer.
   */
- std::pair<std::vector<int64_t>, std::vector<int64_t>> get_tokens_with_mask(
-    Tokenizer* tokenizer,
-    const std::string& prompt,
-    int max_length = DEFAULT_MAX_LENGTH,
-    void* log_ctx = nullptr);
+ void free_tokenizer(TokenizerHandle tokenizer);
  
- /**
-  * Tokenize a text prompt and return attention mask using unique_ptr.
-  * 
-  * @param tokenizer Reference to unique_ptr of the tokenizer.
-  * @param prompt The text prompt to tokenize.
-  * @param max_length Maximum length of token sequence (including special tokens).
-  * @param log_ctx Context for logging.
-  * @return Pair of vectors: first is token IDs, second is attention mask (1 for tokens, 0 for padding).
-  */
- std::pair<std::vector<int64_t>, std::vector<int64_t>> get_tokens_with_mask(
-    const std::unique_ptr<Tokenizer>& tokenizer,
-    const std::string& prompt,
-    int max_length = DEFAULT_MAX_LENGTH,
-    void* log_ctx = nullptr);
+ #ifdef __cplusplus
+ }
+ #endif
  
- #endif // AVFILTER_DNN_DNN_TOKENIZER_H
+ #endif // AVFILTER_DNN_TOKENIZER_H
