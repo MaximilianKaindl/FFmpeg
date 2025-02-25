@@ -26,18 +26,17 @@
  #include <memory>
  #include <vector>
  #include <torch/script.h>
- #include <tokenizers_cpp.h>
- 
- using tokenizers::Tokenizer;
+ #include "tokenizers_c.h"
  
  typedef struct THClipContext {
-     std::unique_ptr<Tokenizer> tokenizer;
+     TokenizerHandle tokenizer;
      std::vector<std::string> labels;
      std::string tokenizer_path;
      int64_t resolution;
  } THClipContext;
  
- #define CLAP_SAMPLE_RATE 48000
+ #define CLXP_EMBEDDING_DIMS 77
+ #define CLAP_SAMPLE_RATE 44100
  
  int init_clip_model(THModel *th_model, DNNFunctionType func_type, const AVFilterContext *filter_ctx, const c10::Device &device);
  int forward_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
