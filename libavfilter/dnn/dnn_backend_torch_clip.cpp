@@ -18,126 +18,12 @@
 
 #include "dnn_backend_torch_clip.h"
 #if (CONFIG_LIBTOKENIZERS == 1)
+#include "dnn_tokenizer.h"
 
 extern "C" {
 #include "libavutil/mem.h"
 #include "libavutil/log.h"
-#include "libswscale/swscale.h"
-#include "libavformat/avio.h"
-}
-
-static torch::Tensor get_tokens(const THModel *th_model, const std::string& prompt) {
-    DnnContext *ctx = th_model->ctx;
-    const int expected_length = EMBEDDING_SIZE_CLIP;
-
-    try {
-        if (!th_model->clip_ctx || !th_model->clip_ctx->tokenizer) {
-            throw std::runtime_error("Tokenizer not initialized");
-        }
-
-        int32_t start_token = th_model->clip_ctx->tokenizer->TokenToId(START_TOKEN_CLIP);
-        int32_t end_token = th_model->clip_ctx->tokenizer->TokenToId(END_TOKEN_CLIP);
-
-        // Create vector with correct size, filled with padding tokens
-        std::vector<int64_t> padded_ids(expected_length, PADDING_TOKEN_CLIP);
-
-        // Add start token
-        padded_ids[0] = start_token;
-
-        try {
-            // Get tokens from the tokenizer
-            std::vector<int> tokens = th_model->clip_ctx->tokenizer->Encode(prompt);
-
-            // Calculate how many tokens we can copy (leaving space for start and end tokens)
-            const size_t max_text_tokens = expected_length - 2;
-
-            const size_t num_tokens = tokens.size();
-            if(num_tokens > max_text_tokens) {
-                av_log(ctx, AV_LOG_WARNING, "Input text is too long, truncating to %ld tokens\n", max_text_tokens);
-            }
-            // Copy tokens after the start token
-            size_t i;
-            for (i = 0; i < num_tokens; i++) {
-                padded_ids[i + 1] = tokens[i];
-            }
-            padded_ids[i+1] = end_token;
-
-            auto tensor = torch::from_blob(
-                padded_ids.data(),
-                {1, expected_length}, 
-                torch::kInt64
-            ).clone(); 
-
-            return tensor;
-
-        } catch (const std::exception& e) {
-            av_log(ctx, AV_LOG_ERROR, "Token encoding failed: %s\n", e.what());
-            // Return empty tensor with correct dimensions on error
-            return torch::zeros({1, expected_length}, torch::kInt64);
-        }
-
-    } catch (const std::exception& e) {
-        av_log(ctx, AV_LOG_ERROR, "Token generation failed: %s\n", e.what());
-        return torch::zeros({1, expected_length}, torch::kInt64);
-    }
-}
-
-static int load_bytes_from_file(const std::string& path, std::string& data, DnnContext* log_ctx) {
-    AVIOContext *ctx = NULL;
-    int ret;
-    int64_t size;
-    
-    ret = avio_open(&ctx, path.c_str(), AVIO_FLAG_READ);
-    if (ret < 0) {
-        av_log(log_ctx, AV_LOG_ERROR, "Cannot open file: %s\n", path.c_str());
-        return ret;
-    }
-
-    size = avio_size(ctx);
-    if (size < 0) {
-        av_log(log_ctx, AV_LOG_ERROR, "Failed to determine file size: %s\n", path.c_str());
-        return size;
-    }
-
-    try {
-        data.resize(size);
-        ret = avio_read(ctx, (unsigned char*)data.data(), size);
-        if (ret < 0) {
-            av_log(log_ctx, AV_LOG_ERROR, "Failed to read file: %s\n", path.c_str());
-            return ret;
-        }
-        if (ret != size) {
-            av_log(log_ctx, AV_LOG_ERROR, "Incomplete read: %s\n", path.c_str());
-            return AVERROR(EIO);
-        }
-    } catch (const std::exception& e) {
-        av_log(log_ctx, AV_LOG_ERROR, "Exception while reading file %s: %s\n", 
-               path.c_str(), e.what());
-        return AVERROR(ENOMEM);
-    }
-
-    return 0;
-}
-
-int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path) {
-    //Dont create tokenizer if it already exists
-    if (th_model->clip_ctx->tokenizer) {
-        return 0;
-    }
-
-    std::string blob;
-    int ret = load_bytes_from_file(tokenizer_path, blob, th_model->ctx);
-    if (ret < 0) {
-        return ret;
-    }
-
-    try {
-        th_model->clip_ctx->tokenizer = Tokenizer::FromBlobJSON(blob);
-    } catch (const c10::Error& e) {
-        av_log(th_model->ctx, AV_LOG_ERROR, "Error creating tokenizer: %s\n", e.what());
-        return AVERROR(EINVAL);
-    }
-    return 0;
+#include "libavfilter/dnn/dnn_io_proc.h"
 }
 
 int get_clip_input_res(THModel *th_model, const c10::Device &device) {
@@ -201,96 +87,32 @@ int init_clip_model(THModel *th_model, DNNFunctionType func_type, const AVFilter
     return 0;
 }
 
-static int resample_audio(AVFrame *frame, int target_sample_rate, float **resampled_data, int *resampled_nb_samples) {
-    SwrContext *swr_ctx = NULL;
-    int ret = 0;
-    AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_MONO;
-    AVChannelLayout in_ch_layout;
-    av_channel_layout_copy(&in_ch_layout, &frame->ch_layout);
-
-    ret = swr_alloc_set_opts2(&swr_ctx,
-                            &out_ch_layout,          // out_ch_layout
-                            AV_SAMPLE_FMT_FLT,        // out_sample_fmt
-                            target_sample_rate,       // out_sample_rate
-                            &in_ch_layout,           // in_ch_layout
-                            (AVSampleFormat)frame->format, // in_sample_fmt
-                            frame->sample_rate,       // in_sample_rate
-                            0, NULL);
-
-    av_channel_layout_uninit(&in_ch_layout);
-    
-    if (ret < 0) {
-        return AVERROR(ENOMEM);
-    }
-    
-    // Initialize the resampler
-    ret = swr_init(swr_ctx);
-    if (ret < 0) {
-        swr_free(&swr_ctx);
-        return ret;
-    }
-    
-    // Calculate output number of samples
-    *resampled_nb_samples = av_rescale_rnd(frame->nb_samples,
-                                          target_sample_rate,
-                                          frame->sample_rate,
-                                          AV_ROUND_UP);
-    
-    // Allocate output buffer
-    *resampled_data = (float*)av_malloc(*resampled_nb_samples * sizeof(float));
-    if (!*resampled_data) {
-        swr_free(&swr_ctx);
-        return AVERROR(ENOMEM);
-    }
-    
-    // Do the actual resampling
-    ret = swr_convert(swr_ctx,
-                      (uint8_t**)resampled_data, *resampled_nb_samples,
-                      (const uint8_t**)frame->data, frame->nb_samples);
-    
-    swr_free(&swr_ctx);
-    
-    if (ret < 0) {
-        av_freep(resampled_data);
-        return ret;
-    }
-    
-    return 0;
-}
-
-int encode_audio_clap(const THModel *th_model, const THRequestItem *request, const c10::Device& device) {
+int encode_audio_clap(const THModel *th_model, const THRequestItem *request) {
     THInferRequest *infer_request = request->infer_request;
     LastLevelTaskItem *lltask = request->lltasks[0];
     TaskItem *task = lltask->task;
     DnnContext *ctx = th_model->ctx;
     float *resampled_data = NULL;
     int resampled_nb_samples = 0;
-    
+    // Resample audio to 48kHz if needed
+    int ret = ff_frame_to_dnn_clap(task->in_frame, CLAP_SAMPLE_RATE, &resampled_data, &resampled_nb_samples);
+    if (ret < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Audio resampling failed\n");
+        return ret;
+    }
+
     try {
-        // Resample audio to 48kHz if needed
-        int ret = resample_audio(task->in_frame, CLAP_SAMPLE_RATE,
-                               &resampled_data, &resampled_nb_samples);
-        if (ret < 0) {
-            av_log(ctx, AV_LOG_ERROR, "Audio resampling failed\n");
-            return ret;
-        }
-        
         // Create input tensor from resampled audio
         *infer_request->input_tensor = torch::from_blob(resampled_data,
                                            {1, resampled_nb_samples},
                                            torch::kFloat32).clone();
-        
-        if (infer_request->input_tensor->device() != device) 
-            *infer_request->input_tensor = infer_request->input_tensor->to(device);
-        
-        av_freep(&resampled_data);
-        return 0;
-        
     } catch (const c10::Error& e) {
         av_freep(&resampled_data);
         av_log(ctx, AV_LOG_ERROR, "Audio encoding error: %s\n", e.what());
         return AVERROR(EINVAL);
     }
+    av_freep(&resampled_data);
+    return 0;
 }
 
 int encode_image_clip(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device& device, bool preprocessing) {
@@ -380,11 +202,25 @@ int encode_text_clip(const THModel *th_model, const THRequestItem *request, cons
         infer_request->text_embeddings->reserve(clip_ctx->labels.size());
 
         for (const auto& label : clip_ctx->labels) {
-            torch::Tensor tokens = get_tokens(th_model, label);
-
-            if (tokens.device() != device) 
+            // Use the get_tokens function (not get_tokens_with_mask) as CLIP doesn't need attention mask
+            std::vector<int64_t> tokens_vec = get_tokens(
+                clip_ctx->tokenizer,
+                label,
+                DEFAULT_MAX_LENGTH,
+                ctx
+            );
+            
+            // Convert vector to tensor and add batch dimension
+            torch::Tensor tokens = torch::tensor(tokens_vec, torch::kInt64).unsqueeze(0);
+            
+            // Move tensor to the correct device
+            if (tokens.device() != device) {
                 tokens = tokens.to(device);
-
+            }
+            
+            av_log(ctx, AV_LOG_DEBUG, "Encoding text '%s' for CLIP\n", label.c_str());
+            
+            // Run text through the model's encode_text method - no attention mask needed
             auto text_embedding = th_model->jit_model->run_method(
                 "encode_text",
                 tokens, 
@@ -392,14 +228,19 @@ int encode_text_clip(const THModel *th_model, const THRequestItem *request, cons
             );
 
             if (!text_embedding.isTensor()) {
-                av_log(ctx, AV_LOG_ERROR, "Model returned invalid non-tensor output for text encoding\n");
+                av_log(ctx, AV_LOG_ERROR, "Model returned invalid non-tensor output for text encoding: %s\n", label.c_str());
                 return AVERROR(EINVAL);
             }
+            
             infer_request->text_embeddings->push_back(text_embedding.toTensor());
         }
+        
         return 0;
     } catch (const c10::Error& e) {
         av_log(ctx, AV_LOG_ERROR, "Text encoding error: %s\n", e.what());
+        return AVERROR(EINVAL);
+    } catch (const std::exception& e) {
+        av_log(ctx, AV_LOG_ERROR, "Exception in encode_text_clip: %s\n", e.what());
         return AVERROR(EINVAL);
     }
 }
@@ -410,52 +251,85 @@ int forward_clap(const THModel *th_model, const THRequestItem *request, const c1
     DnnContext *ctx = th_model->ctx;
     THClipContext *clip_ctx = th_model->clip_ctx;
     infer_request->text_embeddings = new std::vector<torch::Tensor>();
-    int ret;
-
-    ret = encode_audio_clap(th_model, request, device);
-    if (ret < 0) {
-        av_log(ctx, AV_LOG_ERROR, "Audio encoding failed in CLAP preprocessing\n");
-        return ret;
-    }
-
+    
     try {
+        // Use the actual audio tensor from input_tensor instead of creating dummy audio
+        torch::Tensor audio_tensor = *infer_request->input_tensor;
+        if (audio_tensor.device() != device) {
+            audio_tensor = audio_tensor.to(device);
+        }
         // Store all similarity results for each label
         std::vector<torch::Tensor> similarities;
         
         for (const auto& label : clip_ctx->labels) {
-            torch::Tensor tokens = get_tokens(th_model, label);
+            // Use the get_tokens_with_mask function to get both tokens and attention mask
+            if (clip_ctx->tokenizer) {
+                // Get tokens and attention mask using the helper function
+                auto [tokens_vec, attention_mask_vec] = get_tokens_with_mask(
+                    clip_ctx->tokenizer,
+                    label,
+                    DEFAULT_MAX_LENGTH,
+                    ctx
+                );
 
-            if (tokens.device() != device) 
-                tokens = tokens.to(device);
-            
-            // Create attention mask (all ones to match the model expectation)
-            torch::Tensor attention_mask = torch::ones({1, tokens.size(1)}, torch::kInt64).to(device);
-            av_log(ctx, AV_LOG_INFO, "About to call forward with tensor shapes: audio=[%ld, %ld], tokens=[%ld, %ld], mask=[%ld, %ld]\n",
-               infer_request->input_tensor->size(0), infer_request->input_tensor->size(1),
-               tokens.size(0), tokens.size(1),
-               attention_mask.size(0), attention_mask.size(1));
-            std::vector<torch::jit::IValue> inputs;
-            inputs.push_back(*infer_request->input_tensor);  // audio
-            inputs.push_back(tokens);                        // input_ids
-            inputs.push_back(attention_mask);                // attention_mask instead of zeros
-            
-            // Run the model and store the result
-            auto similarity = th_model->jit_model->forward(inputs).toTensor();
-            similarities.push_back(similarity);
+                torch::Tensor tokens = torch::tensor(tokens_vec, torch::kInt64);
+                torch::Tensor attention_mask = torch::tensor(attention_mask_vec, torch::kInt64);
+                
+                // Move tensors to the correct device
+                if (tokens.device() != device) {
+                    tokens = tokens.to(device);
+                }
+                if (attention_mask.device() != device) {
+                    attention_mask = attention_mask.to(device);
+                }
+                
+                // Convert vectors to tensors
+                tokens = tokens.unsqueeze(0);
+                attention_mask = attention_mask.unsqueeze(0);
+                av_log(ctx, AV_LOG_DEBUG, "Processing label '%s' with proper tokenization\n", label.c_str());
+                
+                // Prepare inputs in the order expected by the model
+                std::vector<torch::jit::IValue> inputs;
+                inputs.push_back(audio_tensor);
+                inputs.push_back(tokens);
+                inputs.push_back(attention_mask);
+                
+                av_log(ctx, AV_LOG_INFO, "Running forward pass for audio and label: %s\n", 
+                       label.c_str());
+                
+                // Execute forward pass
+                try {
+                    auto result = th_model->jit_model->forward(inputs);
+                    av_log(ctx, AV_LOG_INFO, "Forward call succeeded for label: %s\n", label.c_str());
+                    
+                    if (result.isTensor()) {
+                        similarities.push_back(result.toTensor());
+                    } else {
+                        av_log(ctx, AV_LOG_ERROR, "Model returned non-tensor output for label: %s\n", 
+                               label.c_str());
+                    }
+                } catch (const c10::Error& e) {
+                    av_log(ctx, AV_LOG_ERROR, "Forward call failed for label %s: %s\n", 
+                           label.c_str(), e.what());
+                    return AVERROR(EINVAL);
+                }
+            } else {
+                av_log(ctx, AV_LOG_ERROR, "No tokenizer available for processing text\n");
+                return AVERROR(EINVAL);
+            }
         }
         
         // Create a tensor with all similarities and assign to output
         if (!similarities.empty()) {
             auto all_similarities = torch::cat(similarities, 1);
-            *infer_request->output = torch::Tensor(all_similarities);
+            infer_request->output = new torch::Tensor(all_similarities);
+            return 0;
         } else {
             av_log(ctx, AV_LOG_ERROR, "No similarity results computed\n");
             return AVERROR(EINVAL);
         }
-        
-        return 0;
-    } catch (const c10::Error& e) {
-        av_log(ctx, AV_LOG_ERROR, "CLAP forward error: %s\n", e.what());
+    } catch (const std::exception& e) {
+        av_log(ctx, AV_LOG_ERROR, "Exception in forward_clap: %s\n", e.what());
         return AVERROR(EINVAL);
     }
 }
@@ -481,27 +355,6 @@ int forward_clip(const THModel *th_model, const THRequestItem *request, const c1
     return 0;
 }
 
-int fill_model_input_clip(const THModel *th_model, const THRequestItem *request, const DNNData& input)
-{
-    DnnContext *ctx = th_model->ctx;
-    THInferRequest *infer_request = request->infer_request;
-    *infer_request->output = infer_request->input_tensor->clone().detach();
-
-    // Verify the clone worked
-    if (!infer_request->output->defined() || infer_request->output->sizes() != infer_request->input_tensor->sizes()) {
-        av_log(ctx, AV_LOG_ERROR, "Tensor cloning failed\n");
-        return AVERROR(EINVAL);
-    }
-
-    int ret;
-    ret = create_tokenizer(th_model, th_model->clip_ctx->tokenizer_path);
-    if(ret < 0) {
-        av_log(ctx, AV_LOG_ERROR, "Error creating tokenizer\n");
-        return ret;
-    }
-    return 0;
-}
-
 int set_params_clip(const THModel *th_model, const char **labels, const int& label_count, const char *tokenizer_path) {
     if (!labels || label_count <= 0) {
         av_log(th_model->ctx, AV_LOG_ERROR, "Label file invalid.\n");
@@ -518,6 +371,15 @@ int set_params_clip(const THModel *th_model, const char **labels, const int& lab
     }
     th_model->clip_ctx->labels = label_vector;
     th_model->clip_ctx->tokenizer_path = tokenizer_path;
+
+    if (!th_model->clip_ctx->tokenizer && !th_model->clip_ctx->tokenizer_path.empty()) {
+        th_model->clip_ctx->tokenizer = create_tokenizer(th_model->clip_ctx->tokenizer_path, th_model->ctx);
+        if (!th_model->clip_ctx->tokenizer) {
+            av_log(th_model->ctx, AV_LOG_ERROR, "Error creating tokenizer\n");
+            return AVERROR(EINVAL);
+        }
+    }
+
     return 0;
 }
 

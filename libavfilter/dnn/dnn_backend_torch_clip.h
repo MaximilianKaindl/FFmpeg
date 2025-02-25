@@ -1,5 +1,5 @@
 /*
-* This file is part of FFmpeg.
+ * This file is part of FFmpeg.
  *
  * FFmpeg is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -15,50 +15,43 @@
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
-#ifndef AVFILTER_DNN_DNN_BACKEND_TORCH_CLIP_H
-#define AVFILTER_DNN_DNN_BACKEND_TORCH_CLIP_H
 
-#include "dnn_backend_torch_common.h"
-extern "C" {
-    #include "libswresample/swresample.h"
-}
-
-#if (CONFIG_LIBTOKENIZERS == 1)
-#include <string>
-#include <memory>
-#include <vector>
-#include <torch/script.h>
-#include <tokenizers_cpp.h>
-
-using tokenizers::Tokenizer;
-
-typedef struct THClipContext {
-    std::unique_ptr<Tokenizer> tokenizer;
-    std::vector<std::string> labels;
-    std::string tokenizer_path;
-    int64_t resolution;
-} THClipContext;
-
-const std::string START_TOKEN_CLIP = "<|startoftext|>";
-const std::string END_TOKEN_CLIP = "<|endoftext|>";
-const int32_t PADDING_TOKEN_CLIP = 0;
-#define EMBEDDING_SIZE_CLIP 77
-#define CLAP_SAMPLE_RATE 48000
-
-int init_clip_model(THModel *th_model, DNNFunctionType func_type, const AVFilterContext *filter_ctx, const c10::Device &device);
-int fill_model_input_clip(const THModel *th_model, const THRequestItem *request, const DNNData& input);
-int forward_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
-int process_clip_similarity(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
-int forward_clap(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
-
-int create_tokenizer(const THModel *th_model, const std::string& tokenizer_path);
-int encode_image_clip(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device& device, bool preprocessing);
-int encode_images_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
-int encode_text_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
-
-int set_params_clip(const THModel *th_model, const char **labels, const int& label_count,
-                   const char *tokenizer_path);
-void free_clip_context(THClipContext *clip_ctx);
-
-#endif
-#endif
+ #ifndef AVFILTER_DNN_DNN_BACKEND_TORCH_CLIP_H
+ #define AVFILTER_DNN_DNN_BACKEND_TORCH_CLIP_H
+ 
+ #include "dnn_backend_torch_common.h" 
+ 
+ #if (CONFIG_LIBTOKENIZERS == 1)
+ #include <string>
+ #include <memory>
+ #include <vector>
+ #include <torch/script.h>
+ #include <tokenizers_cpp.h>
+ 
+ using tokenizers::Tokenizer;
+ 
+ typedef struct THClipContext {
+     std::unique_ptr<Tokenizer> tokenizer;
+     std::vector<std::string> labels;
+     std::string tokenizer_path;
+     int64_t resolution;
+ } THClipContext;
+ 
+ #define CLAP_SAMPLE_RATE 48000
+ 
+ int init_clip_model(THModel *th_model, DNNFunctionType func_type, const AVFilterContext *filter_ctx, const c10::Device &device);
+ int forward_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
+ int process_clip_similarity(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
+ int forward_clap(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
+ 
+ int encode_image_clip(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device& device, bool preprocessing);
+ int encode_audio_clap(const THModel *th_model, const THRequestItem *request);
+ int encode_images_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
+ int encode_text_clip(const THModel *th_model, const THRequestItem *request, const c10::Device& device);
+ 
+ int set_params_clip(const THModel *th_model, const char **labels, const int& label_count,
+                    const char *tokenizer_path);
+ void free_clip_context(THClipContext *clip_ctx);
+ 
+ #endif
+ #endif

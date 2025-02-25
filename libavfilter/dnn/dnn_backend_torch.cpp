@@ -244,12 +244,7 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
         }
         request->lltasks[request->lltask_count++] = lltask;
         task = lltask->task;
-        ret = create_tokenizer(th_model, th_model->clip_ctx->tokenizer_path);
-        if(ret < 0) {
-            av_log(ctx, AV_LOG_ERROR, "Error creating tokenizer\n");
-            return ret;
-        }
-        return 0;
+        return encode_audio_clap(th_model,request);
     }
 
     while (ff_queue_size(th_model->lltask_queue) != 0) {
@@ -315,15 +310,6 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
         ret = AVERROR(EINVAL);
         goto err;
     }
-
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    if(th_model->is_clip_model){
-        ret = fill_model_input_clip(th_model, request, input);
-        if (ret < 0) {
-            goto err;
-        }
-    }
-    #endif
     return 0;
 
 err:
@@ -405,7 +391,7 @@ static void infer_completion_callback(void *args) {
     outputs.layout = DL_NCHW;
     outputs.dt = DNN_FLOAT;
     #if (CONFIG_LIBTOKENIZERS == 1)
-    if (th_model->is_clip_model) {
+    if (th_model->is_clip_model || th_model->is_clap_model) {
         // CLIP outputs are similarity scores [batch_size, num_labels]
         if (sizes.size() != 2) {
             av_log(th_model->ctx, AV_LOG_ERROR, "Invalid CLIP output dimensions\n");
@@ -466,6 +452,7 @@ static void infer_completion_callback(void *args) {
             break;
         #if (CONFIG_LIBTOKENIZERS == 1)
         case DFT_ANALYTICS_CLIP:
+        case DFT_ANALYTICS_CLAP:
             if (task->do_ioproc) {
                 if (!th_model->model.classify_post_proc) {
                     av_log(th_model->ctx, AV_LOG_ERROR, "CLIP filter needs to provide post proc\n");
