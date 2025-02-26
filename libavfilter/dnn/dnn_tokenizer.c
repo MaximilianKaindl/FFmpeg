@@ -170,6 +170,142 @@ int tokenize_text(TokenizerHandle tokenizer, const char *prompt, int target_leng
     return 0;
 }
 
+/**
+ * Tokenize multiple text prompts in batch mode.
+ * The function allocates memory for the token IDs which should be freed by the caller.
+ *
+ * @param tokenizer     Pointer to the tokenizer.
+ * @param prompts       Array of text prompts to tokenize.
+ * @param num_prompts   Number of prompts in the array.
+ * @param target_length Maximum length for each tokenized sequence.
+ * @param token_ids     Output parameter for the dynamically allocated token ID arrays.
+ * @param n_tokens      Output parameter for the number of tokens for each prompt.
+ * @param log_ctx       Context for logging.
+ * @return 0 on success, error code on failure.
+ */
+int tokenize_text_batch(TokenizerHandle tokenizer, const char **prompts, int num_prompts,
+                        int target_length, int ***token_ids, int **n_tokens, void *log_ctx)
+{
+    if (!tokenizer)
+    {
+        if (log_ctx)
+        {
+            av_log(log_ctx, AV_LOG_ERROR, "Tokenizer is null\n");
+        }
+        return AVERROR(EINVAL);
+    }
+
+    if (num_prompts <= 0)
+    {
+        if (log_ctx)
+        {
+            av_log(log_ctx, AV_LOG_ERROR, "Invalid number of prompts\n");
+        }
+        return AVERROR(EINVAL);
+    }
+
+    // Allocate arrays for results
+    *token_ids = av_calloc(num_prompts, sizeof(int *));
+    if (!*token_ids)
+    {
+        return AVERROR(ENOMEM);
+    }
+
+    *n_tokens = av_calloc(num_prompts, sizeof(int));
+    if (!*n_tokens)
+    {
+        av_freep(token_ids);
+        return AVERROR(ENOMEM);
+    }
+
+    // Prepare for batch encoding
+    TokenizerEncodeResult *results = av_calloc(num_prompts, sizeof(TokenizerEncodeResult));
+    if (!results)
+    {
+        av_freep(n_tokens);
+        av_freep(token_ids);
+        return AVERROR(ENOMEM);
+    }
+
+    // Prepare length array
+    size_t *lengths = av_calloc(num_prompts, sizeof(size_t));
+    if (!lengths)
+    {
+        av_freep(results);
+        av_freep(n_tokens);
+        av_freep(token_ids);
+        return AVERROR(ENOMEM);
+    }
+
+    // Fill lengths array
+    for (int i = 0; i < num_prompts; i++)
+    {
+        lengths[i] = strlen(prompts[i]);
+    }
+
+    // Encode batch with special tokens
+    tokenizers_encode_batch(tokenizer, prompts, lengths, num_prompts, 1, results);
+
+    // Process results
+    for (int i = 0; i < num_prompts; i++)
+    {
+        (*n_tokens)[i] = results[i].len;
+
+        // Allocate memory for the token IDs
+        (*token_ids)[i] = av_malloc(target_length * sizeof(int));
+        if (!(*token_ids)[i])
+        {
+            // Clean up already allocated resources
+            for (int j = 0; j < i; j++)
+            {
+                av_freep(&(*token_ids)[j]);
+            }
+            tokenizers_free_encode_results(results, num_prompts);
+            av_freep(&lengths);
+            av_freep(n_tokens);
+            av_freep(token_ids);
+            return AVERROR(ENOMEM);
+        }
+
+        // Copy tokens and pad with zeros (or appropriate padding token)
+        int j;
+        for (j = 0; j < results[i].len && j < target_length; j++)
+        {
+            (*token_ids)[i][j] = results[i].token_ids[j];
+        }
+
+        // Fill remaining positions with padding token (typically 0)
+        for (; j < target_length; j++)
+        {
+            (*token_ids)[i][j] = 0; // Use appropriate padding token
+        }
+    }
+
+    // Free resources
+    tokenizers_free_encode_results(results, num_prompts);
+    av_freep(&lengths);
+
+    return 0;
+}
+
+/**
+ * Free resources allocated by tokenize_text_batch.
+ *
+ * @param token_ids    Array of token ID arrays to free.
+ * @param num_prompts  Number of prompts/token arrays.
+ */
+void free_batch_tokens(int **token_ids, int num_prompts)
+{
+    if (!token_ids)
+        return;
+
+    for (int i = 0; i < num_prompts; i++)
+    {
+        av_freep(&token_ids[i]);
+    }
+    av_freep(&token_ids);
+}
+
 void free_tokenizer(TokenizerHandle tokenizer)
 {
     if (tokenizer)

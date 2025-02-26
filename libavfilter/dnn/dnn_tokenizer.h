@@ -66,23 +66,29 @@
  int tokenize_text(TokenizerHandle tokenizer, const char *prompt, int target_length,
                   int **token_ids, int *n_tokens, void *log_ctx);
  
- /**
-  * Tokenize a text prompt and return attention mask along with tokens.
-  * Special tokens are handled automatically by the tokenizer.
-  * The function allocates memory for both token IDs and attention mask 
-  * which should be freed by the caller.
-  * 
-  * @param tokenizer      Pointer to the tokenizer.
-  * @param prompt         The text prompt to tokenize.
-  * @param token_ids      Output parameter for the dynamically allocated token ID array.
-  * @param attention_mask Output parameter for the dynamically allocated attention mask array.
-  * @param n_tokens       Output parameter for the number of tokens.
-  * @param log_ctx        Context for logging.
-  * @return 0 on success, error code on failure.
-  */
- int tokenize_text_with_mask(TokenizerHandle tokenizer, const char *prompt, int target_length,
-                            int **token_ids, int **attention_mask, 
-                            int *n_tokens, void *log_ctx);
+/**
+ * Tokenize multiple text prompts in batch mode.
+ * The function allocates memory for the token IDs which should be freed by the caller.
+ * 
+ * @param tokenizer     Pointer to the tokenizer.
+ * @param prompts       Array of text prompts to tokenize.
+ * @param num_prompts   Number of prompts in the array.
+ * @param target_length Maximum length for each tokenized sequence.
+ * @param token_ids     Output parameter for the dynamically allocated token ID arrays.
+ * @param n_tokens      Output parameter for the number of tokens for each prompt.
+ * @param log_ctx       Context for logging.
+ * @return 0 on success, error code on failure.
+ */
+int tokenize_text_batch(TokenizerHandle tokenizer, const char **prompts, int num_prompts, 
+    int target_length, int ***token_ids, int **n_tokens, void *log_ctx);
+
+/**
+* Free resources allocated by tokenize_text_batch.
+* 
+* @param token_ids    Array of token ID arrays to free.
+* @param num_prompts  Number of prompts/token arrays.
+*/
+void free_batch_tokens(int **token_ids, int num_prompts);
  
  /**
   * Free tokenizer resources.
