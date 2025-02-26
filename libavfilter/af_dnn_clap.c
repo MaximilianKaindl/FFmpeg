@@ -53,6 +53,8 @@
 #define OFFSET(x) offsetof(DNNCLAPContext, dnnctx.x)
 #define OFFSET2(x) offsetof(DNNCLAPContext, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_AUDIO_PARAM
+#define SAMPLE_RATE 44100
+#define MIN_SAMPLES_PER_FRAME SAMPLE_RATE * 7
 
 static const AVOption dnn_clap_options[] = {
     { "dnn_backend", "DNN backend", 
@@ -108,18 +110,6 @@ static AVDetectionBBox *clap_find_or_create_detection_bbox(AVFrame *frame, uint3
 
 // Utility function to set probability and label of bbox
 static int clap_set_prob_and_label_of_bbox(AVDetectionBBox *bbox, char *label, int index, float probability) {
-    // Validate parameters
-    if (!bbox || !label) {
-        av_log(NULL, AV_LOG_ERROR, "Invalid parameters in set_prob_and_label_of_bbox\n");
-        return AVERROR(EINVAL);
-    }
-
-    // Check index bounds
-    if (index < 0 || index >= AV_NUM_DETECTION_BBOX_CLASSIFY) {
-        av_log(NULL, AV_LOG_ERROR, "Invalid index %d in set_prob_and_label_of_bbox\n", index);
-        return AVERROR(EINVAL);
-    }
-
     // Set probability
     bbox->classify_confidences[index] = av_make_q((int)(probability * 10000), 10000);
 
@@ -412,11 +402,12 @@ static int dnn_clap_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_ind
     }
 
     // Choose post-processing based on which context is available
-    if (ctx->label_classification_ctx) {
-        return clap_post_proc_labels(frame, output, bbox_index, filter_ctx);
-    } else if (ctx->category_classification_ctx) {
+    if (ctx->category_classification_ctx) {
         return clap_post_proc_categories(frame, output, bbox_index, filter_ctx);
     }
+    else if (ctx->label_classification_ctx) {
+        return clap_post_proc_labels(frame, output, bbox_index, filter_ctx);
+    } 
     
     av_log(filter_ctx, AV_LOG_ERROR, "No valid CLAP classification context available\n");
     return AVERROR(EINVAL);
@@ -427,14 +418,20 @@ static void free_clap_contexts(DNNCLAPContext *ctx)
     if (!ctx)
         return;
 
-    if (ctx->label_classification_ctx) {
-        free_label_context(ctx->label_classification_ctx);
-        av_freep(&ctx->label_classification_ctx);
-    }
-
     if (ctx->category_classification_ctx) {
         free_category_classfication_context(ctx->category_classification_ctx);
         av_freep(&ctx->category_classification_ctx);
+        if (ctx->label_classification_ctx) {
+            av_freep(&ctx->label_classification_ctx->labels);
+            av_freep(&ctx->label_classification_ctx);
+        }
+        ctx->category_classification_ctx = NULL;
+        ctx->label_classification_ctx = NULL;
+    }
+    else if (ctx->label_classification_ctx) {
+        free_label_context(ctx->label_classification_ctx);
+        av_freep(&ctx->label_classification_ctx);
+        ctx->label_classification_ctx = NULL;
     }
 }
 
@@ -442,14 +439,6 @@ static av_cold int dnn_clap_init(AVFilterContext *context)
 {
     DNNCLAPContext *ctx = context->priv;
     int ret;
-
-    // Initialize DNN context for CLAP
-    ret = ff_dnn_init(&ctx->dnnctx, DFT_ANALYTICS_CLAP, context);
-    if (ret < 0)
-        return ret;
-        
-    // Set post-processing function
-    ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_clap_post_proc);
 
     // Verify input parameters
     if (!ctx->tokenizer_path) {
@@ -493,7 +482,30 @@ static av_cold int dnn_clap_init(AVFilterContext *context)
             free_clap_contexts(ctx);
             return ret;
         }
+        
+        // Combine all labels into a single context for DNN initialization
+        ret = combine_all_category_labels(&ctx->label_classification_ctx, ctx->category_classification_ctx);
+        if (ret < 0) {
+            av_log(context, AV_LOG_ERROR, "Failed to combine labels\n");
+            free_clap_contexts(ctx);
+            return ret;
+        }
     }
+    
+    // Initialize DNN context with tokenizer
+    ret = ff_dnn_init_with_tokenizer(&ctx->dnnctx, 
+                                    DFT_ANALYTICS_CLAP, 
+                                    ctx->label_classification_ctx->labels,
+                                    ctx->label_classification_ctx->label_count, 
+                                    ctx->tokenizer_path, 
+                                    context);
+    if (ret < 0) {
+        free_clap_contexts(ctx);
+        return ret;
+    }
+    
+    // Set post-processing function
+    ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_clap_post_proc);
     
     return 0;
 }
@@ -509,68 +521,6 @@ static void dnn_clap_uninit(AVFilterContext *context)
     free_clap_contexts(ctx);
 }
 
- // Execute CLAP model with all categories
-static int execute_clap_model_for_all_categories(DNNCLAPContext *ctx, AVFrame *frame) {
-    char **combined_labels = NULL;
-    int combined_idx = 0;
-    int ret;
-    CategoryClassifcationContext *cat_class_ctx = ctx->category_classification_ctx;
-
-    // Allocate array for all labels
-    combined_labels = av_calloc(cat_class_ctx->total_labels, sizeof(char *));
-    if (!combined_labels) {
-        return AVERROR(ENOMEM);
-    }
-    
-    // Combine all labels from all categories
-    for (int c = 0; c < cat_class_ctx->num_contexts; c++) {
-        CategoriesContext *current_ctx = cat_class_ctx->category_units[c];
-        for (int i = 0; i < current_ctx->category_count; i++) {
-            CategoryContext *category = &current_ctx->categories[i];
-            for (int j = 0; j < category->labels->label_count; j++) {
-                combined_labels[combined_idx] = category->labels->labels[j];
-                combined_idx++;
-            }
-        }    
-    }
-    
-    // Execute model with ALL labels combined
-    ret = ff_dnn_execute_model_clip(&ctx->dnnctx, frame, NULL,
-        combined_labels,
-        cat_class_ctx->total_labels,
-        ctx->tokenizer_path,
-        ctx->target
-    );
-
-    av_freep(&combined_labels);
-    return ret;
-}
-
-// Process 5-second audio frame with the appropriate model
-static int process_audio_frame(AVFilterContext *filter_ctx, AVFrame *frame) {
-    DNNCLAPContext *ctx = filter_ctx->priv;
-    int ret;
-    
-    // Choose processing method based on available context
-    if (ctx->label_classification_ctx) {
-        // Process with labels
-        ret = ff_dnn_execute_model_clip(&ctx->dnnctx, frame, NULL,
-            ctx->label_classification_ctx->labels,
-            ctx->label_classification_ctx->label_count,
-            ctx->tokenizer_path,
-            ctx->target
-        );
-    } else if (ctx->category_classification_ctx) {
-        // Process with categories
-        ret = execute_clap_model_for_all_categories(ctx, frame);
-    } else {
-        av_log(filter_ctx, AV_LOG_ERROR, "No classification context available\n");
-        return AVERROR(EINVAL);
-    }
-    
-    return ret;
-}
- 
 static int dnn_clap_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
  {
      DNNCLAPContext *ctx = outlink->src->priv;
@@ -619,12 +569,20 @@ static int dnn_clap_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out
      if (ret < 0)
          return ret;
      if (ret > 0) {
-         // Process the frame immediately since it should already be 5 seconds
-         ret = process_audio_frame(filter_ctx, in);
-         if (ret != 0) {
-             av_frame_free(&in);
-             return ret;
-         }
+
+        if(in->nb_samples >= MIN_SAMPLES_PER_FRAME){
+            // Process the frame immediately since it should already be 5 seconds
+            ret = ff_dnn_execute_model_clip(&ctx->dnnctx, in, NULL,
+                ctx->label_classification_ctx->labels,
+                ctx->label_classification_ctx->label_count,
+                ctx->tokenizer_path,
+                ctx->target
+            );         
+            if (ret != 0) {
+                av_frame_free(&in);
+                return ret;
+            }
+        }
      }
  
      // Handle processed frames
@@ -664,12 +622,10 @@ static int dnn_clap_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out
      AVFilterContext *filter_ctx = inlink->dst;
      DNNCLAPContext *ctx = filter_ctx->priv;
      
-     ctx->sample_rate = inlink->sample_rate;
-     ctx->samples_per_frame = ctx->sample_rate * 7; 
-     // Set min/max samples using the proper internal API
-     ff_filter_link(inlink)->min_samples = ctx->samples_per_frame;
-     ff_filter_link(inlink)->max_samples = ctx->samples_per_frame;
-     
+     if(inlink->sample_rate != SAMPLE_RATE){
+         av_log(filter_ctx, AV_LOG_ERROR, "Invalid sample rate. CLAP requires 44100 Hz\n");
+         return AVERROR(EINVAL);
+     }
      return 0;
  }
 static const AVFilterPad dnn_clap_inputs[] = {
