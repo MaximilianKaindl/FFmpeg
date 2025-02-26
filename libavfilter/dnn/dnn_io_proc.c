@@ -24,6 +24,9 @@
 #include "libswscale/swscale.h"
 #include "libavutil/avassert.h"
 #include "libavutil/detection_bbox.h"
+#include "libswresample/swresample.h"
+#include "libavutil/samplefmt.h"
+#include "libswscale/swscale.h"
 
 static int get_datatype_size(DNNDataType dt)
 {
@@ -419,6 +422,64 @@ int ff_frame_to_dnn_classify(AVFrame *frame, DNNData *input, uint32_t bbox_index
 
     return ret;
 }
+
+int ff_frame_to_dnn_clap(AVFrame *frame, int target_sample_rate, float **resampled_data, int *resampled_nb_samples) {
+    SwrContext *swr_ctx = NULL;
+    int ret = 0;
+    AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_MONO;
+    AVChannelLayout in_ch_layout;
+    av_channel_layout_copy(&in_ch_layout, &frame->ch_layout);
+
+    ret = swr_alloc_set_opts2(&swr_ctx,
+                            &out_ch_layout,          // out_ch_layout
+                            AV_SAMPLE_FMT_FLT,        // out_sample_fmt
+                            target_sample_rate,       // out_sample_rate
+                            &in_ch_layout,           // in_ch_layout
+                            frame->format, // in_sample_fmt
+                            frame->sample_rate,       // in_sample_rate
+                            0, NULL);
+
+    av_channel_layout_uninit(&in_ch_layout);
+    
+    if (ret < 0) {
+        return AVERROR(ENOMEM);
+    }
+    
+    // Initialize the resampler
+    ret = swr_init(swr_ctx);
+    if (ret < 0) {
+        swr_free(&swr_ctx);
+        return ret;
+    }
+    
+    // Calculate output number of samples
+    *resampled_nb_samples = av_rescale_rnd(frame->nb_samples,
+                                          target_sample_rate,
+                                          frame->sample_rate,
+                                          AV_ROUND_UP);
+    
+    // Allocate output buffer
+    *resampled_data = (float*)av_malloc(*resampled_nb_samples * sizeof(float));
+    if (!*resampled_data) {
+        swr_free(&swr_ctx);
+        return AVERROR(ENOMEM);
+    }
+    
+    // Do the actual resampling
+    ret = swr_convert(swr_ctx,
+                      (uint8_t**)resampled_data, *resampled_nb_samples,
+                      (const uint8_t**)frame->data, frame->nb_samples);
+    
+    swr_free(&swr_ctx);
+    
+    if (ret < 0) {
+        av_freep(resampled_data);
+        return ret;
+    }
+    
+    return 0;
+}
+
 
 int ff_frame_to_dnn_detect(AVFrame *frame, DNNData *input, void *log_ctx)
 {

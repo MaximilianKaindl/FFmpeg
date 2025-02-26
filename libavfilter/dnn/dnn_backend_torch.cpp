@@ -43,6 +43,7 @@ static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Q
 
     switch(func_type){
     case DFT_PROCESS_FRAME:
+    case DFT_ANALYTICS_CLAP:
     {
         LastLevelTaskItem *lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
         if (!lltask) {
@@ -51,6 +52,7 @@ static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Q
         }
         task->inference_todo = 1;
         task->inference_done = 0;
+        lltask->bbox_index = 0;
         lltask->task = task;
         if (ff_queue_push_back(lltask_queue, lltask) < 0) {
             av_log(ctx, AV_LOG_ERROR, "Failed to push back lltask_queue.\n");
@@ -140,12 +142,6 @@ static void th_free_request(THInferRequest *request)
         delete(request->input_tensor);
         request->input_tensor = NULL;
     }
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    if (request->text_embeddings) {
-        delete(request->text_embeddings);
-        request->text_embeddings = NULL;    
-    }
-    #endif
     return;
 }
 
@@ -191,9 +187,7 @@ static void dnn_free_model_th(DNNModel **model)
     ff_queue_destroy(th_model->task_queue);
     delete th_model->jit_model;
     #if (CONFIG_LIBTOKENIZERS == 1)
-    if (th_model->is_clip_model) {
-        free_clip_context(th_model->clip_ctx);
-    }
+    free_clip_context(th_model->clip_ctx);
     #endif
     av_freep(&th_model);
     *model = NULL;
@@ -236,6 +230,16 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     infer_request->input_tensor = new torch::Tensor();
     infer_request->output = new torch::Tensor();
 
+    if(th_model->model.func_type == DFT_ANALYTICS_CLAP){
+        lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
+        if (!lltask) {
+            return -1;
+        }
+        request->lltasks[request->lltask_count++] = lltask;
+        task = lltask->task;
+        return prepare_audio_tensor(th_model,request);
+    }
+
     while (ff_queue_size(th_model->lltask_queue) != 0) {
         lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
         if (!lltask) {
@@ -274,6 +278,9 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
             auto tensor = torch::from_blob(input.data,
                 {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
                 deleter, torch::kFloat32).clone();
+            if(th_model->model.func_type == DFT_ANALYTICS_CLIP){
+                preprocess_image_tensor(th_model, &tensor, torch::kCPU);
+            }
             batch_tensors.push_back(tensor);
             input.data = NULL;  // Ownership transferred to tensor
         } catch (const c10::Error& e) {
@@ -299,15 +306,6 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
         ret = AVERROR(EINVAL);
         goto err;
     }
-
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    if(th_model->is_clip_model){
-        ret = fill_model_input_clip(th_model, request, input);
-        if (ret < 0) {
-            goto err;
-        }
-    }
-    #endif
     return 0;
 
 err:
@@ -350,20 +348,43 @@ static int th_start_inference(void *args)
     }
     // Transfer tensor to the same device as model
     c10::Device device = (*th_model->jit_model->parameters().begin()).device();
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    if (th_model->is_clip_model) {
-        int ret = forward_clip(th_model,request,device);
-        if(ret < 0){
-            return ret;
-        }
-        return 0;
-    }
-    #endif
+    
     if (infer_request->input_tensor->device() != device)
         *infer_request->input_tensor = infer_request->input_tensor->to(device);
     inputs.push_back(*infer_request->input_tensor);
 
-    *infer_request->output = th_model->jit_model->forward(inputs).toTensor();
+    #if (CONFIG_LIBTOKENIZERS == 1)
+    if(th_model->model.func_type == DFT_ANALYTICS_CLIP){
+        inputs.push_back(*th_model->clip_ctx->tokenized_text);
+    }
+    else if (th_model->model.func_type == DFT_ANALYTICS_CLAP){
+        inputs.push_back(*th_model->clip_ctx->tokenized_text);
+        inputs.push_back(*th_model->clip_ctx->attention_mask);
+    }
+    #endif
+
+    auto result = th_model->jit_model->forward(inputs);
+
+    if(th_model->model.func_type == DFT_PROCESS_FRAME){
+        *infer_request->output = result.toTensor();
+    }
+    else if (th_model->model.func_type == DFT_ANALYTICS_CLIP){
+        if(result.isTuple()){
+            auto result_tuple = result.toTuple();
+            auto image_embeddings = result_tuple->elements()[0].toTensor();
+            auto text_embeddings = result_tuple->elements()[1].toTensor();
+            *infer_request->output = calculate_clip_similarity_matrix(image_embeddings, text_embeddings, ctx);
+        }
+    }
+    else if (th_model->model.func_type == DFT_ANALYTICS_CLAP){
+        if(result.isTuple()){
+            *infer_request->output = result.toTuple()->elements()[2].toTensor();
+        }
+    }
+    else {
+        avpriv_report_missing_feature(ctx, "model function type %d", th_model->model.func_type);
+        return AVERROR(EINVAL);
+    }
 
     return 0;
 }
@@ -382,7 +403,7 @@ static void infer_completion_callback(void *args) {
     outputs.layout = DL_NCHW;
     outputs.dt = DNN_FLOAT;
     #if (CONFIG_LIBTOKENIZERS == 1)
-    if (th_model->is_clip_model) {
+    if (th_model->model.func_type == DFT_ANALYTICS_CLIP || th_model->model.func_type == DFT_ANALYTICS_CLAP) {
         // CLIP outputs are similarity scores [batch_size, num_labels]
         if (sizes.size() != 2) {
             av_log(th_model->ctx, AV_LOG_ERROR, "Invalid CLIP output dimensions\n");
@@ -443,6 +464,7 @@ static void infer_completion_callback(void *args) {
             break;
         #if (CONFIG_LIBTOKENIZERS == 1)
         case DFT_ANALYTICS_CLIP:
+        case DFT_ANALYTICS_CLAP:
             if (task->do_ioproc) {
                 if (!th_model->model.classify_post_proc) {
                     av_log(th_model->ctx, AV_LOG_ERROR, "CLIP filter needs to provide post proc\n");
@@ -565,14 +587,10 @@ static THInferRequest *th_create_inference_request(void)
     }
     request->input_tensor = NULL;
     request->output = NULL;
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    request->text_embeddings = NULL;
-    #endif
     return request;
 }
 
-static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
-{
+static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx){
     DNNModel *model = NULL;
     THModel *th_model = NULL;
     THRequestItem *item = NULL;
@@ -632,13 +650,6 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
         th_model->jit_model = new torch::jit::Module;
         (*th_model->jit_model) = torch::jit::load(ctx->model_filename);
         th_model->jit_model->to(device);
-        #if (CONFIG_LIBTOKENIZERS == 1)
-        th_model->is_clip_model = false;
-        // Check if this is a CLIP model and initialize accordingly
-        if (func_type == DFT_ANALYTICS_CLIP && init_clip_model(th_model,filter_ctx, device) > 0) {
-            goto fail;
-        }
-        #endif
     } catch (const c10::Error& e) {
         av_log(ctx, AV_LOG_ERROR, "Failed to load torch model\n");
         goto fail;
@@ -682,7 +693,7 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
     model->get_output = &get_output_th;
     model->filter_ctx = filter_ctx;
     model->func_type = func_type;
-    return model;
+    return th_model;
 
 fail:
     if (item) {
@@ -692,6 +703,30 @@ fail:
     dnn_free_model_th(&model);
     return NULL;
 }
+
+static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
+{
+    THModel *th_model = init_model_th(ctx, func_type, filter_ctx);
+    if (!th_model) {
+        return NULL;
+    }
+    return &th_model->model;
+}
+
+static DNNModel *dnn_load_model_with_tokenizer_th(DnnContext *ctx, DNNFunctionType func_type,  const char** labels, int label_count, const char* tokenizer_path, AVFilterContext *filter_ctx){
+    THModel *th_model = init_model_th(ctx, func_type, filter_ctx);
+    if (th_model == NULL) {
+        return NULL;
+    }
+    #if (CONFIG_LIBTOKENIZERS == 1)
+    // Check if this is a CLIP model and initialize accordingly
+    if ((func_type == DFT_ANALYTICS_CLIP || func_type == DFT_ANALYTICS_CLAP) && init_clip_model(th_model,func_type,labels,label_count,tokenizer_path,filter_ctx) > 0) {
+        return NULL;
+    }
+    #endif
+    return &th_model->model;
+}
+
 
 static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_params)
 {
@@ -749,17 +784,6 @@ static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_p
         return AVERROR(EINVAL);
     }
     request->lltask_count = 0;
-
-    #if (CONFIG_LIBTOKENIZERS == 1)
-    if(model->func_type == DFT_ANALYTICS_CLIP) {
-        DNNExecZeroShotClassificationParams *params = (DNNExecZeroShotClassificationParams *) exec_params;
-        ret = set_params_clip(th_model, params->labels, params->label_count, params->tokenizer_path);
-        if (ret < 0) {
-            return ret;
-        }
-    }
-    #endif
-
     return execute_model_th(request, th_model->lltask_queue);
 }
 
@@ -791,6 +815,7 @@ extern const DNNModule ff_dnn_backend_torch = {
     .clazz          = DNN_DEFINE_CLASS(dnn_th),
     .type           = DNN_TH,
     .load_model     = dnn_load_model_th,
+    .load_model_with_tokenizer = dnn_load_model_with_tokenizer_th,
     .execute_model  = dnn_execute_model_th,
     .get_result     = dnn_get_result_th,
     .flush          = dnn_flush_th,

@@ -58,7 +58,8 @@ typedef enum {
     DFT_PROCESS_FRAME,      // process the whole frame
     DFT_ANALYTICS_DETECT,   // detect from the whole frame
     DFT_ANALYTICS_CLASSIFY, // classify for each bounding box
-    DFT_ANALYTICS_CLIP      // classify whole frame with zero-shot classification
+    DFT_ANALYTICS_CLIP,      // classify whole frame with zero-shot classification
+    DFT_ANALYTICS_CLAP      // classify whole audio frame with zero-shot classification
 }DNNFunctionType;
 
 typedef enum {
@@ -186,6 +187,9 @@ struct DNNModule {
     DNNBackendType type;
     // Loads model and parameters from given file. Returns NULL if it is not possible.
     DNNModel *(*load_model)(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx);
+
+    DNNModel *(*load_model_with_tokenizer)(DnnContext *ctx, DNNFunctionType func_type, const char** labels, int label_count, const char* tokenizer_path, AVFilterContext *filter_ctx);
+
     // Executes model with specified input and output. Returns the error code otherwise.
     int (*execute_model)(const DNNModel *model, DNNExecBaseParams *exec_params);
     // Retrieve inference result.
