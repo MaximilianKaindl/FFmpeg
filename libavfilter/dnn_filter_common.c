@@ -69,9 +69,7 @@ void *ff_dnn_filter_child_next(void *obj, void *prev)
     DnnFilterBase *base = obj;
     return ff_dnn_child_next(&base->dnnctx, prev);
 }
-
-int ff_dnn_init(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
-{
+int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx){
     DNNBackendType backend = ctx->backend_type;
 
     if (!ctx->model_filename) {
@@ -133,13 +131,34 @@ int ff_dnn_init(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *fil
             }
         }
     }
+    return 0;
+}
 
+
+int ff_dnn_init(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
+{
+    int ret = ff_dnn_init_priv(ctx, func_type, filter_ctx);
+    if (ret < 0) {
+        return ret;
+    }
     ctx->model = (ctx->dnn_module->load_model)(ctx, func_type, filter_ctx);
     if (!ctx->model) {
         av_log(filter_ctx, AV_LOG_ERROR, "could not load DNN model\n");
         return AVERROR(EINVAL);
     }
+    return 0;
+}
 
+int ff_dnn_init_with_tokenizer(DnnContext *ctx, DNNFunctionType func_type, char** labels, int label_count, char* tokenizer_path, AVFilterContext *filter_ctx){
+    int ret = ff_dnn_init_priv(ctx, func_type, filter_ctx);
+    if (ret < 0) {
+        return ret;
+    }
+    ctx->model = (ctx->dnn_module->load_model_with_tokenizer)(ctx, func_type, labels, label_count, tokenizer_path, filter_ctx);
+    if (!ctx->model) {
+        av_log(filter_ctx, AV_LOG_ERROR, "could not load DNN model\n");
+        return AVERROR(EINVAL);
+    }
     return 0;
 }
 
