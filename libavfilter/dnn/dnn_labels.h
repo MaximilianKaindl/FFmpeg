@@ -89,5 +89,6 @@ void free_categories_context(CategoriesContext *ctx);
 void free_category_classfication_context(CategoryClassifcationContext *category_classification_ctx);
 int read_label_file(AVFilterContext *context, LabelContext *label_classification_ctx, char* labels_filename, int max_line_length);
 int read_categories_file(AVFilterContext *context, CategoryClassifcationContext *cat_class_ctx, char* categories_filename, int max_line_length);
+int combine_all_category_labels(LabelContext **label_ctx, CategoryClassifcationContext *cat_class_ctx);
 
 #endif

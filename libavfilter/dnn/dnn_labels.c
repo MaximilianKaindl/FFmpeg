@@ -328,3 +328,36 @@ end:
    fclose(file);
    return ret;
 }
+
+int combine_all_category_labels(LabelContext **label_ctx, CategoryClassifcationContext *cat_class_ctx)
+{
+    char **combined_labels = NULL;
+    int combined_idx = 0;
+    
+    *label_ctx = av_calloc(1, sizeof(LabelContext));
+    if (!(*label_ctx))
+        return AVERROR(ENOMEM);
+    
+    (*label_ctx)->label_count = cat_class_ctx->total_labels;
+    (*label_ctx)->labels = av_calloc(cat_class_ctx->total_labels, sizeof(char *));
+    if (!(*label_ctx)->labels) {
+        av_freep(label_ctx);
+        return AVERROR(ENOMEM);
+    }
+
+    combined_labels = (*label_ctx)->labels;
+    
+    // Combine all labels from all categories
+    for (int c = 0; c < cat_class_ctx->num_contexts; c++) {
+        CategoriesContext *current_ctx = cat_class_ctx->category_units[c];
+        for (int i = 0; i < current_ctx->category_count; i++) {
+            CategoryContext *category = &current_ctx->categories[i];
+            for (int j = 0; j < category->labels->label_count; j++) {
+                combined_labels[combined_idx] = category->labels->labels[j];
+                combined_idx++;
+            }
+        }    
+    }
+    
+    return 0;
+}
