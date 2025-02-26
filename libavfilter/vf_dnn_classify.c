@@ -91,18 +91,6 @@ AVFILTER_DNN_DEFINE_CLASS(dnn_classify, DNN_OV);
 
 
 static int dnn_classify_set_prob_and_label_of_bbox(AVDetectionBBox *bbox, char *label, int index, float probability) {
-    // Validate parameters
-    if (!bbox || !label) {
-        av_log(NULL, AV_LOG_ERROR, "Invalid parameters in set_prob_and_label_of_bbox\n");
-        return AVERROR(EINVAL);
-    }
-
-    // Check index bounds
-    if (index < 0 || index >= AV_NUM_DETECTION_BBOX_CLASSIFY) {
-        av_log(NULL, AV_LOG_ERROR, "Invalid index %d in set_prob_and_label_of_bbox\n", index);
-        return AVERROR(EINVAL);
-    }
-
     // Set probability
     bbox->classify_confidences[index] = av_make_q((int) (probability * 10000), 10000);
 
@@ -111,9 +99,6 @@ static int dnn_classify_set_prob_and_label_of_bbox(AVDetectionBBox *bbox, char *
                    AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) >= AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) {
         av_log(NULL, AV_LOG_WARNING, "Label truncated in set_prob_and_label_of_bbox\n");
     }
-
-    av_log(NULL, AV_LOG_DEBUG, "Set bbox label: %s with probability: %f at index: %d\n",
-           bbox->classify_labels[index], probability, index);
 
     return 0;
 }
@@ -210,15 +195,13 @@ static int post_proc_standard(AVFrame *frame, DNNData *output, uint32_t bbox_ind
         snprintf(bbox->classify_labels[bbox->classify_count], sizeof(bbox->classify_labels[bbox->classify_count]), "%d",
                  label_id);
     }
-
     bbox->classify_count++;
 
     return 0;
 }
 
 
-static AVDetectionBBox *
-find_or_create_detection_bbox(AVFrame *frame, uint32_t bbox_index, AVFilterContext *filter_ctx) {
+static AVDetectionBBox *find_or_create_detection_bbox(AVFrame *frame, uint32_t bbox_index, AVFilterContext *filter_ctx) {
     DnnClassifyContext *ctx = filter_ctx->priv;
     AVFrameSideData *sd;
     AVDetectionBBoxHeader *header;
@@ -465,11 +448,12 @@ static int dnn_classify_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox
 
     // Choose post-processing based on backend
     if (ctx->dnnctx.backend_type == DNN_TH) {
-        if (ctx->label_classification_ctx) {
-            return post_proc_clip_labels(frame, output, bbox_index, filter_ctx);
-        } else if (ctx->category_classification_ctx) {
+        if (ctx->category_classification_ctx) {
             return post_proc_clip_categories(frame, output, bbox_index, filter_ctx);
         }
+        else if (ctx->label_classification_ctx) {
+            return post_proc_clip_labels(frame, output, bbox_index, filter_ctx);
+        } 
         av_log(filter_ctx, AV_LOG_ERROR, "No valid CLIP classification context available\n");
         return AVERROR(EINVAL);
     } else {
@@ -480,16 +464,16 @@ static int dnn_classify_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox
 static void free_contexts(DnnClassifyContext *ctx) {
     if (!ctx)
         return;
-
-    if (ctx->label_classification_ctx) {
-        free_label_context(ctx->label_classification_ctx);
-        ctx->label_classification_ctx = NULL;
-    }
-
     if (ctx->category_classification_ctx) {
         free_category_classfication_context(ctx->category_classification_ctx);
         av_freep(&ctx->category_classification_ctx);
+        av_freep(&ctx->label_classification_ctx);
         ctx->category_classification_ctx = NULL;
+        ctx->label_classification_ctx = NULL;
+    }
+    else if (ctx->label_classification_ctx) {
+        free_label_context(ctx->label_classification_ctx);
+        ctx->label_classification_ctx = NULL;
     }
 }
 
@@ -500,49 +484,81 @@ static av_cold int dnn_classify_init(AVFilterContext *context) {
     DNNFunctionType goal_mode = DFT_ANALYTICS_CLASSIFY;
     if (ctx->dnnctx.backend_type == DNN_TH) {
         goal_mode = DFT_ANALYTICS_CLIP;
-    }
+        if (ctx->labels_filename && ctx->categories_filename) {
+            av_log(context, AV_LOG_ERROR, "Labels and categories file cannot be used together\n");
+            return AVERROR(EINVAL);
+        }
+    
+        if (ctx->labels_filename) {
+            ctx->label_classification_ctx = av_calloc(1, sizeof(LabelContext));
+            if (!ctx->label_classification_ctx)
+                return AVERROR(ENOMEM);
+            ret = read_label_file(context, ctx->label_classification_ctx, ctx->labels_filename,
+                                  AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+            if (ret < 0) {
+                av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
+                return ret;
+            }
+        } else if (ctx->categories_filename && goal_mode != DFT_ANALYTICS_CLASSIFY) {
+            ctx->category_classification_ctx = av_calloc(1, sizeof(CategoryClassifcationContext));
+            if (!ctx->category_classification_ctx)
+                return AVERROR(ENOMEM);
+    
+            ret = read_categories_file(context, ctx->category_classification_ctx, ctx->categories_filename,
+                                       AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+            if (ret < 0) {
+                av_log(context, AV_LOG_ERROR, "Failed to read categories file\n");
+                free_contexts(ctx);
+                return ret;
+            }
+            ret = combine_all_category_labels(&ctx->label_classification_ctx, ctx->category_classification_ctx);
+            if (ret < 0) {
+                av_log(context, AV_LOG_ERROR, "Failed to combine labels\n");
+                free_contexts(ctx);
+                return ret;
+            }
+        } else if (ctx->categories_filename && goal_mode == DFT_ANALYTICS_CLASSIFY){
+            av_log(context, AV_LOG_ERROR, "Categories file is only supported for CLIP models\n");
+            return AVERROR(EINVAL);
+        }
+        else{
+            av_log(context, AV_LOG_ERROR, "Labels or categories file is required for classification\n");
+            return AVERROR(EINVAL);
+        }
 
-    ret = ff_dnn_init(&ctx->dnnctx, goal_mode, context);
-    if (ret < 0)
-        return ret;
-    ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_classify_post_proc);
-
-    if (ctx->labels_filename && ctx->categories_filename) {
-        av_log(context, AV_LOG_ERROR, "Labels and categories file cannot be used together\n");
-        return AVERROR(EINVAL);
-    }
-
-    if (ctx->labels_filename) {
-        ctx->label_classification_ctx = av_calloc(1, sizeof(LabelContext));
-        if (!ctx->label_classification_ctx)
-            return AVERROR(ENOMEM);
-        ret = read_label_file(context, ctx->label_classification_ctx, ctx->labels_filename,
-                              AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+        if (!ctx->tokenizer_path) {
+            av_log(context, AV_LOG_ERROR, "Tokenizer file is required for CLIP classification\n");
+            return AVERROR(EINVAL);
+        }
+        ret = ff_dnn_init_with_tokenizer(&ctx->dnnctx, goal_mode, ctx->label_classification_ctx->labels,
+                                         ctx->label_classification_ctx->label_count, ctx->tokenizer_path, context);
         if (ret < 0) {
-            av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
             return ret;
         }
-    } else if (ctx->categories_filename) {
-        ctx->category_classification_ctx = av_calloc(1, sizeof(CategoryClassifcationContext));
-        if (!ctx->category_classification_ctx)
-            return AVERROR(ENOMEM);
-
-        ret = read_categories_file(context, ctx->category_classification_ctx, ctx->categories_filename,
-                                   AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
-        if (ret < 0) {
-            av_log(context, AV_LOG_ERROR, "Failed to read categories file\n");
-            free_contexts(ctx);
+        ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_classify_post_proc);
+        return 0;
+    }
+    else {
+        ret = ff_dnn_init(&ctx->dnnctx, goal_mode, context);
+        if (ret < 0)
             return ret;
+        ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_classify_post_proc);
+        if (ctx->labels_filename) {
+            ctx->label_classification_ctx = av_calloc(1, sizeof(LabelContext));
+            if (!ctx->label_classification_ctx)
+                return AVERROR(ENOMEM);
+            ret = read_label_file(context, ctx->label_classification_ctx, ctx->labels_filename,
+                                  AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+            if (ret < 0) {
+                av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
+                return ret;
+            }
+        } else{
+            av_log(context, AV_LOG_ERROR, "Labels file is required for classification\n");
+            return AVERROR(EINVAL);
         }
+        return 0;
     }
-
-    // For CLIP models, require tokenizer
-    if (ctx->dnnctx.backend_type == DNN_TH && !ctx->tokenizer_path) {
-        av_log(context, AV_LOG_ERROR, "Tokenizer file is required for CLIP classification\n");
-        return AVERROR(EINVAL);
-    }
-
-    return 0;
 }
 
 static const enum AVPixelFormat pix_fmts[] = {
@@ -581,39 +597,6 @@ static int dnn_classify_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t 
     return 0;
 }
 
-static int execute_clip_model_for_all_categories(DnnClassifyContext *ctx, AVFrame *frame) {
-    char **combined_labels = NULL;
-    int combined_idx = 0;
-    int ret;
-    CategoryClassifcationContext *cat_class_ctx = ctx->category_classification_ctx;
-
-    // Allocate array for all labels
-    combined_labels = av_calloc(cat_class_ctx->total_labels, sizeof(char *));
-    if (!combined_labels) {
-        return AVERROR(ENOMEM);
-    }
-    for (int c = 0; c < cat_class_ctx->num_contexts; c++) {
-        CategoriesContext *current_ctx = cat_class_ctx->category_units[c];
-        for (int i = 0; i < current_ctx->category_count; i++) {
-            CategoryContext *category = &current_ctx->categories[i];
-            for (int j = 0; j < category->labels->label_count; j++) {
-                combined_labels[combined_idx] = category->labels->labels[j];
-                combined_idx++;
-            }
-        }
-    }
-    // Execute model with ALL labels combined
-    ret = ff_dnn_execute_model_clip(&ctx->dnnctx, frame, NULL,
-                                    combined_labels,
-                                    cat_class_ctx->total_labels,
-                                    ctx->tokenizer_path,
-                                    ctx->target
-    );
-
-    av_freep(&combined_labels);
-    return ret;
-}
-
 static int dnn_classify_activate(AVFilterContext *filter_ctx) {
     AVFilterLink *inlink = filter_ctx->inputs[0];
     AVFilterLink *outlink = filter_ctx->outputs[0];
@@ -633,17 +616,12 @@ static int dnn_classify_activate(AVFilterContext *filter_ctx) {
             return ret;
         if (ret > 0) {
             if (ctx->dnnctx.backend_type == DNN_TH) {
-                // CLIP processing
-                if (ctx->label_classification_ctx) {
-                    ret = ff_dnn_execute_model_clip(&ctx->dnnctx, in, NULL,
-                                                    ctx->label_classification_ctx->labels,
-                                                    ctx->label_classification_ctx->label_count,
-                                                    ctx->tokenizer_path,
-                                                    ctx->target
-                    );
-                } else if (ctx->category_classification_ctx) {
-                    ret = execute_clip_model_for_all_categories(ctx, in);
-                }
+                ret = ff_dnn_execute_model_clip(&ctx->dnnctx, in, NULL,
+                    ctx->label_classification_ctx->labels,
+                    ctx->label_classification_ctx->label_count,
+                    ctx->tokenizer_path,
+                    ctx->target
+                );
             } else {
                 // Standard classification
                 ret = ff_dnn_execute_model_classification(&ctx->dnnctx, in, NULL, ctx->target);
