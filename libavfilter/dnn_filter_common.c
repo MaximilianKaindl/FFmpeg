@@ -221,7 +221,7 @@ int ff_dnn_execute_model_classification(DnnContext *ctx, AVFrame *in_frame, AVFr
     return (ctx->dnn_module->execute_model)(ctx->model, &class_params.base);
 }
 
-int ff_dnn_execute_model_clip(DnnContext *ctx, AVFrame *in_frame, AVFrame *out_frame, const char **labels, int label_count, const char* tokenizer_path, char *target)
+int ff_dnn_execute_model_clxp(DnnContext *ctx, AVFrame *in_frame, AVFrame *out_frame, const char **labels, int label_count, const char* tokenizer_path, char *target)
 {
     DNNExecZeroShotClassificationParams class_params = {
         {
