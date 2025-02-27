@@ -37,8 +37,9 @@
 #include "video.h"
 
 #define TYPE_ALL 2 // Number of media types (video and audio)
-#define SAMPLE_RATE 44100
-#define MIN_SAMPLES_PER_FRAME SAMPLE_RATE * 7 // 7 seconds of audio for CLAP
+#define CLAP_SAMPLE_RATE 44100
+#define CLAP_SAMPLE_DURATION_SECONDS 7 
+#define CLAP_MIN_SAMPLES_PER_FRAME (CLAP_SAMPLE_RATE * CLAP_SAMPLE_DURATION_SECONDS)
 
 typedef struct DnnClassifyContext {
   const AVClass *class;
@@ -637,8 +638,8 @@ static int config_input(AVFilterLink *inlink) {
   // Set type-specific parameters and check compatibility
   if (ctx->type == AVMEDIA_TYPE_AUDIO) {
     // Audio-specific settings
-    ctx->sample_rate = SAMPLE_RATE;
-    ctx->samples_per_frame = MIN_SAMPLES_PER_FRAME;
+    ctx->sample_rate = CLAP_SAMPLE_RATE;
+    ctx->samples_per_frame = CLAP_MIN_SAMPLES_PER_FRAME;
     goal_mode = DFT_ANALYTICS_CLAP;
 
     // Check backend compatibility
@@ -649,7 +650,7 @@ static int config_input(AVFilterLink *inlink) {
     }
 
     // Check sample rate
-    if (inlink->sample_rate != SAMPLE_RATE) {
+    if (inlink->sample_rate != CLAP_SAMPLE_RATE) {
       av_log(context, AV_LOG_ERROR,
              "Invalid sample rate. CLAP requires 44100 Hz\n");
       return AVERROR(EINVAL);
@@ -829,7 +830,7 @@ static int query_formats(AVFilterContext *ctx) {
       return ret;
 
     ret = ff_set_common_samplerates(
-        ctx, ff_make_format_list((const int[]){SAMPLE_RATE, -1}));
+        ctx, ff_make_format_list((const int[]){CLAP_SAMPLE_RATE, -1}));
     if (ret < 0)
       return ret;
 
@@ -898,11 +899,11 @@ static int process_audio_frame(AVFilterContext *context, AVFrame *frame) {
   DnnClassifyContext *ctx = context->priv;
   int ret;
 
-  if (frame->nb_samples < MIN_SAMPLES_PER_FRAME) {
+  if (frame->nb_samples < CLAP_MIN_SAMPLES_PER_FRAME) {
     av_log(
         context, AV_LOG_WARNING,
         "Audio frame too short for CLAP analysis (needs %d samples, got %d)\n",
-        MIN_SAMPLES_PER_FRAME, frame->nb_samples);
+        CLAP_MIN_SAMPLES_PER_FRAME, frame->nb_samples);
     return 0;
   }
 
