@@ -28,77 +28,83 @@
  #include <stdint.h>
  #include "tokenizers_c.h"
  
- #ifdef __cplusplus
- extern "C" {
- #endif
- 
  /**
-  * Load bytes from a file into memory.
-  * 
-  * @param path      The file path.
-  * @param data      Output parameter for the loaded data.
-  * @param data_size Output parameter for the data size.
-  * @param log_ctx   Context for logging.
-  * @return 0 on success, error code on failure.
-  */
- int load_bytes_from_file(const char *path, char **data, size_t *data_size, void *log_ctx);
- 
- /**
-  * Create a tokenizer from a tokenizer file.
-  * 
-  * @param tokenizer_path Path to the tokenizer file.
-  * @param log_ctx        Context for logging.
+  * Create a tokenizer from a file path.
+  *
+  * @param path    Path to the tokenizer file.
+  * @param log_ctx Context for logging.
   * @return Handle to the created tokenizer, or NULL on failure.
   */
- TokenizerHandle create_tokenizer(const char *tokenizer_path, void *log_ctx);
+ TokenizerHandle ff_dnn_tokenizer_create(const char *path, void *log_ctx);
  
  /**
-  * Tokenize a text prompt with special tokens automatically handled by the tokenizer.
-  * The function allocates memory for the token IDs which should be freed by the caller.
-  * 
-  * @param tokenizer  Pointer to the tokenizer.
-  * @param prompt     The text prompt to tokenize.
-  * @param token_ids  Output parameter for the dynamically allocated token ID array.
-  * @param n_tokens   Output parameter for the number of tokens.
-  * @param log_ctx    Context for logging.
-  * @return 0 on success, error code on failure.
+  * Tokenize text with special tokens.
+  *
+  * @param tokenizer     Handle to the tokenizer.
+  * @param text          Text to tokenize.
+  * @param token_ids     Output parameter for token IDs (caller must free with av_free).
+  * @param token_count   Output parameter for the number of tokens generated.
+  * @param log_ctx       Context for logging.
+  * @return 0 on success, negative error code on failure.
   */
- int tokenize_text(TokenizerHandle tokenizer, const char *prompt, int target_length,
-                  int **token_ids, int *n_tokens, void *log_ctx);
- 
-/**
- * Tokenize multiple text prompts in batch mode.
- * The function allocates memory for the token IDs which should be freed by the caller.
- * 
- * @param tokenizer     Pointer to the tokenizer.
- * @param prompts       Array of text prompts to tokenize.
- * @param num_prompts   Number of prompts in the array.
- * @param target_length Maximum length for each tokenized sequence.
- * @param token_ids     Output parameter for the dynamically allocated token ID arrays.
- * @param n_tokens      Output parameter for the number of tokens for each prompt.
- * @param log_ctx       Context for logging.
- * @return 0 on success, error code on failure.
- */
-int tokenize_text_batch(TokenizerHandle tokenizer, const char **prompts, int num_prompts, 
-    int target_length, int ***token_ids, int **n_tokens, void *log_ctx);
+ int ff_dnn_tokenizer_encode(TokenizerHandle tokenizer, const char *text,
+                             int **token_ids, int *token_count, void *log_ctx);
 
-/**
-* Free resources allocated by tokenize_text_batch.
-* 
-* @param token_ids    Array of token ID arrays to free.
-* @param num_prompts  Number of prompts/token arrays.
-*/
-void free_batch_tokens(int **token_ids, int num_prompts);
+ /**
+  * Tokenize text with special tokens.
+  *
+  * @param path          Path to the tokenizer file.
+  * @param text          Text to tokenize.
+  * @param token_ids     Output parameter for token IDs (caller must free with av_free).
+  * @param token_count   Output parameter for the number of tokens generated.
+  * @param log_ctx       Context for logging.
+  * @return 0 on success, negative error code on failure.
+  */
+ int ff_dnn_create_tokenizer_and_encode(const char *path, const char *text,
+    int **token_ids, int *token_count, void *log_ctx);
+
+ /**
+  * Tokenize multiple texts in batch mode with special tokens.
+  *
+  * @param tokenizer     Handle to the tokenizer.
+  * @param texts         Array of texts to tokenize.
+  * @param text_count    Number of texts in the array.
+  * @param token_ids     Output parameter for token IDs array (caller must free with ff_dnn_tokenizer_free_batch).
+  * @param token_counts  Output parameter for the number of tokens for each text (caller must free with av_free).
+  * @param log_ctx       Context for logging.
+  * @return 0 on success, negative error code on failure.
+  */
+ int ff_dnn_tokenizer_encode_batch(TokenizerHandle tokenizer, const char **texts, int text_count,
+                                   int ***token_ids, int **token_counts, void *log_ctx);
+ 
+
+ /**
+  * Tokenize multiple texts in batch mode with special tokens.
+  *
+  * @param path          Path to the tokenizer file.
+  * @param texts         Array of texts to tokenize.
+  * @param text_count    Number of texts in the array.
+  * @param token_ids     Output parameter for token IDs array (caller must free with ff_dnn_tokenizer_free_batch).
+  * @param token_counts  Output parameter for the number of tokens for each text (caller must free with av_free).
+  * @param log_ctx       Context for logging.
+  * @return 0 on success, negative error code on failure.
+  */
+ int ff_dnn_create_tokenizer_and_encode_batch(const char *path, const char **texts, int text_count,
+    int ***token_ids, int **token_counts, void *log_ctx);
+
+ /**
+  * Free resources allocated by ff_dnn_tokenizer_encode_batch.
+  *
+  * @param token_ids    Array of token ID arrays to free.
+  * @param token_count  Number of token arrays.
+  */
+ void ff_dnn_tokenizer_free_batch(int **token_ids, int token_count);
  
  /**
   * Free tokenizer resources.
-  * 
+  *
   * @param tokenizer Handle to the tokenizer.
   */
- void free_tokenizer(TokenizerHandle tokenizer);
+ void ff_dnn_tokenizer_free(TokenizerHandle tokenizer);
  
- #ifdef __cplusplus
- }
- #endif
- 
- #endif // AVFILTER_DNN_TOKENIZER_H
+ #endif /* AVFILTER_DNN_TOKENIZER_H */
