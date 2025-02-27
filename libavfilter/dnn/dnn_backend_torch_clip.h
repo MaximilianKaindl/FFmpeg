@@ -26,7 +26,6 @@
 #include <memory>
 #include <vector>
 #include <torch/script.h>
-#include "tokenizers_c.h"
 
 typedef struct THClipContext {
     torch::Tensor *tokenized_text;
