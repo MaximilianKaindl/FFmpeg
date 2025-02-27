@@ -368,17 +368,12 @@ static int th_start_inference(void *args)
     if(th_model->model.func_type == DFT_PROCESS_FRAME){
         *infer_request->output = result.toTensor();
     }
-    else if (th_model->model.func_type == DFT_ANALYTICS_CLIP){
+    else if (th_model->model.func_type == DFT_ANALYTICS_CLIP || th_model->model.func_type == DFT_ANALYTICS_CLAP){
         if(result.isTuple()){
             auto result_tuple = result.toTuple();
             auto image_embeddings = result_tuple->elements()[0].toTensor();
             auto text_embeddings = result_tuple->elements()[1].toTensor();
             *infer_request->output = calculate_clip_similarity_matrix(image_embeddings, text_embeddings, ctx);
-        }
-    }
-    else if (th_model->model.func_type == DFT_ANALYTICS_CLAP){
-        if(result.isTuple()){
-            *infer_request->output = result.toTuple()->elements()[2].toTensor();
         }
     }
     else {
@@ -411,9 +406,9 @@ static void infer_completion_callback(void *args) {
         }
         outputs.dims[0] = sizes[0];  // batch_size
         outputs.dims[1] = sizes[1];  // number of labels
-        outputs.order = DCO_RGB;  // doesn't matter for similarity scores
+        outputs.order = th_model->model.func_type == DFT_ANALYTICS_CLIP ? DCO_RGB : DCO_NONE;  // doesn't matter for similarity scores
         outputs.dt = DNN_FLOAT;
-    } else 
+    } else
     #endif
     if (sizes.size() == 4 && th_model->model.func_type == DFT_PROCESS_FRAME) {
         // 4 dimensions: [batch_size, channel, height, width]
@@ -484,7 +479,6 @@ static void infer_completion_callback(void *args) {
 err:
     av_freep(&request->lltasks);
     request->lltask_count = 0;
-    th_free_request(infer_request);
 
     if (ff_safe_queue_push_back(th_model->request_queue, request) < 0) {
         destroy_request_item(&request);
