@@ -86,8 +86,8 @@ int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext
                                                "all outputname(s) will be ignored.\n");
                                                
         #if (CONFIG_LIBTOKENIZERS == 0)
-        if(func_type == DFT_ANALYTICS_ZEROSHOTCLASSIFY) {
-            av_log(ctx, AV_LOG_ERROR, "tokenizers-cpp is not included. Clip Classification requires tokenizers-cpp library. Include it with configure.\n");
+        if((func_type == DFT_ANALYTICS_CLIP || func_type == DFT_ANALYTICS_CLAP)){
+            av_log(ctx, AV_LOG_ERROR, "tokenizers-cpp is not included. CLIP/CLAP Classification requires tokenizers-cpp library. Include it with configure.\n");
             return AVERROR(EINVAL);
         }
         #endif
