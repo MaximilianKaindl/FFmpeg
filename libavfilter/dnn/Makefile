@@ -9,6 +9,5 @@ OBJS-$(CONFIG_DNN)                           += dnn/dnn_tokenizer.o
 DNN-OBJS-$(CONFIG_LIBTENSORFLOW)             += dnn/dnn_backend_tf.o
 DNN-OBJS-$(CONFIG_LIBOPENVINO)               += dnn/dnn_backend_openvino.o
 DNN-OBJS-$(CONFIG_LIBTORCH)                   += dnn/dnn_backend_torch.o
-DNN-OBJS-$(CONFIG_LIBTORCH)                   += dnn/dnn_backend_torch_clip.o
 
 OBJS-$(CONFIG_DNN)                           += $(DNN-OBJS-yes)
