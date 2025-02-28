@@ -36,955 +36,911 @@
 #include "libavutil/time.h"
 #include "video.h"
 
-#define TYPE_ALL 2 // Number of media types (video and audio)
+#define TYPE_ALL 2  // Number of media types (video and audio)
 #define CLAP_SAMPLE_RATE 44100
-#define CLAP_SAMPLE_DURATION_SECONDS 7 
+#define CLAP_SAMPLE_DURATION_SECONDS 7
 #define CLAP_MIN_SAMPLES_PER_FRAME (CLAP_SAMPLE_RATE * CLAP_SAMPLE_DURATION_SECONDS)
 
 typedef struct DnnClassifyContext {
-  const AVClass *class;
-  DnnContext dnnctx;
-  float confidence;
-  char *labels_filename;
-  char *target;
-  enum AVMediaType type; // AVMEDIA_TYPE_VIDEO or AVMEDIA_TYPE_AUDIO
-  int is_audio;          // New flag to indicate if input will be audio
+    const AVClass *class;
+    DnnContext dnnctx;
+    float confidence;
+    char *labels_filename;
+    char *target;
+    enum AVMediaType type;  // AVMEDIA_TYPE_VIDEO or AVMEDIA_TYPE_AUDIO
 
-  // Standard classification
-  LabelContext *label_classification_ctx;
+    // Standard classification
+    LabelContext *label_classification_ctx;
 
-  // CLIP/CLAP-specific fields
-  // classify in categories
-  CategoryClassifcationContext *category_classification_ctx;
+    // CLIP/CLAP-specific fields
+    // classify in categories
+    CategoryClassifcationContext *category_classification_ctx;
 
-  // Parameters to change Results of the similarity calculation
-  float logit_scale;
-  float temperature;
+    // Parameters to change Results of the similarity calculation
+    float logit_scale;
+    float temperature;
 
-  char *categories_filename;
-  char *tokenizer_path;
+    char *categories_filename;
+    char *tokenizer_path;
 
-  // Audio-specific parameters
-  int sample_rate;           // Only relevant for audio streams
-  int64_t samples_per_frame; // Minimum samples needed for CLAP
+    // Audio-specific parameters
+    int is_audio;               // New flag to indicate if input will be audio
+    int sample_rate;            // Only relevant for audio streams
+    int64_t samples_per_frame;  // Minimum samples needed for CLAP
 } DnnClassifyContext;
 
 #define OFFSET(x) offsetof(DnnClassifyContext, dnnctx.x)
 #define OFFSET2(x) offsetof(DnnClassifyContext, x)
-#define FLAGS                                                                  \
-  AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM |                      \
-      AV_OPT_FLAG_AUDIO_PARAM
+#define FLAGS                                               \
+    AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM | \
+        AV_OPT_FLAG_AUDIO_PARAM
 
 static const AVOption dnn_classify_options[] = {
-    {"dnn_backend",
-     "DNN backend",
-     OFFSET(backend_type),
-     AV_OPT_TYPE_INT,
-     {.i64 = DNN_OV},
-     INT_MIN,
-     INT_MAX,
-     FLAGS,
-     .unit = "backend"},
+    {"dnn_backend", "DNN backend", OFFSET(backend_type), AV_OPT_TYPE_INT,
+     {.i64 = DNN_OV}, INT_MIN, INT_MAX, FLAGS, .unit = "backend"},
 #if (CONFIG_LIBOPENVINO == 1)
-    {"openvino",
-     "openvino backend flag",
-     0,
-     AV_OPT_TYPE_CONST,
-     {.i64 = DNN_OV},
-     0,
-     0,
-     FLAGS,
-     .unit = "backend"},
+    {"openvino", "openvino backend flag", 0, AV_OPT_TYPE_CONST,
+     {.i64 = DNN_OV}, 0, 0, FLAGS, .unit = "backend"},
 #endif
 #if (CONFIG_LIBTORCH == 1)
-    {"torch",
-     "torch backend flag",
-     0,
-     AV_OPT_TYPE_CONST,
-     {.i64 = DNN_TH},
-     0,
-     0,
-     FLAGS,
-     .unit = "backend"},
+    {"torch", "torch backend flag", 0, AV_OPT_TYPE_CONST,
+     {.i64 = DNN_TH}, 0, 0, FLAGS, .unit = "backend"},
 #endif
-    {"confidence",
-     "threshold of confidence",
-     OFFSET2(confidence),
-     AV_OPT_TYPE_FLOAT,
-     {.dbl = 0.5},
-     0,
-     1,
-     FLAGS},
-    {"labels",
-     "path to labels file",
-     OFFSET2(labels_filename),
-     AV_OPT_TYPE_STRING,
-     {.str = NULL},
-     0,
-     0,
-     FLAGS},
-    {"target",
-     "which one to be classified",
-     OFFSET2(target),
-     AV_OPT_TYPE_STRING,
-     {.str = NULL},
-     0,
-     0,
-     FLAGS},
-    {"categories",
-     "path to categories file (CLIP/CLAP only)",
-     OFFSET2(categories_filename),
-     AV_OPT_TYPE_STRING,
-     {.str = NULL},
-     0,
-     0,
-     FLAGS},
-    {"tokenizer",
-     "path to text tokenizer.json file (CLIP/CLAP only)",
-     OFFSET2(tokenizer_path),
-     AV_OPT_TYPE_STRING,
-     {.str = NULL},
-     0,
-     0,
-     FLAGS},
-    {"logit_scale",
-     "logit scale for similarity calculation",
-     OFFSET2(logit_scale),
-     AV_OPT_TYPE_FLOAT,
-     {.dbl = 4.6052},
-     0,
-     100.0,
-     FLAGS},
-    {"temperature",
-     "softmax temperature",
-     OFFSET2(temperature),
-     AV_OPT_TYPE_FLOAT,
-     {.dbl = 1.0},
-     0,
-     100.0,
-     FLAGS},
-    {"is_audio",
-     "force audio processing mode",
-     OFFSET2(is_audio),
-     AV_OPT_TYPE_BOOL,
-     {.i64 = 0},
-     0,
-     1,
-     FLAGS},
-    {NULL}};
+    {"confidence", "threshold of confidence", OFFSET2(confidence),
+     AV_OPT_TYPE_FLOAT, {.dbl = 0.5}, 0, 1, FLAGS},
+    {"labels", "path to labels file", OFFSET2(labels_filename),
+     AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
+    {"target", "which one to be classified", OFFSET2(target),
+     AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
+    {"categories", "path to categories file (CLIP/CLAP only)",
+     OFFSET2(categories_filename), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
+    {"tokenizer", "path to text tokenizer.json file (CLIP/CLAP only)",
+     OFFSET2(tokenizer_path), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
+    {"logit_scale", "logit scale for similarity calculation",
+     OFFSET2(logit_scale), AV_OPT_TYPE_FLOAT, {.dbl = 4.6052}, 0, 100.0, FLAGS},
+    {"temperature", "softmax temperature", OFFSET2(temperature),
+     AV_OPT_TYPE_FLOAT, {.dbl = 1.0}, 0, 100.0, FLAGS},
+    {"is_audio", "force audio processing mode", OFFSET2(is_audio),
+     AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, FLAGS},
+    {NULL}
+};
 
 AVFILTER_DNN_DEFINE_CLASS(dnn_classify, DNN_OV);
 
 static int set_prob_and_label_of_bbox(AVDetectionBBox *bbox, char *label,
-                                      int index, float probability) {
-  // Set probability
-  bbox->classify_confidences[index] =
-      av_make_q((int)(probability * 10000), 10000);
+                                      int index, float probability)
+{
+    // Set probability
+    bbox->classify_confidences[index] =
+        av_make_q((int)(probability * 10000), 10000);
 
-  // Copy label with size checking
-  if (av_strlcpy(bbox->classify_labels[index], label,
-                 AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) >=
-      AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) {
-    av_log(NULL, AV_LOG_WARNING,
-           "Label truncated in set_prob_and_label_of_bbox\n");
-  }
+    // Copy label with size checking
+    if (av_strlcpy(bbox->classify_labels[index], label,
+                   AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) >=
+        AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) {
+        av_log(NULL, AV_LOG_WARNING,
+               "Label truncated in set_prob_and_label_of_bbox\n");
+    }
 
-  return 0;
+    return 0;
 }
 
 static int softmax(float *input, size_t input_len, float logit_scale,
-                   float temperature, AVFilterContext *ctx) {
-  float sum, offset, m;
+                   float temperature, AVFilterContext *ctx)
+{
+    float sum, offset, m;
 
-  if (!input || input_len == 0) {
-    av_log(ctx, AV_LOG_ERROR, "Invalid input to softmax\n");
-    return AVERROR(EINVAL);
-  }
-
-  if (temperature <= 0.0f) {
-    temperature = 1.0f;
-  }
-
-  // Apply logit scale
-  for (size_t i = 0; i < input_len; i++) {
-    input[i] *= logit_scale;
-  }
-
-  m = input[0];
-  for (size_t i = 1; i < input_len; i++) {
-    if (input[i] > m) {
-      m = input[i];
+    if (!input || input_len == 0) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid input to softmax\n");
+        return AVERROR(EINVAL);
     }
-  }
 
-  sum = 0.0f;
-  for (size_t i = 0; i < input_len; i++) {
-    sum += expf((input[i] - m) / temperature);
-  }
+    if (temperature <= 0.0f) {
+        temperature = 1.0f;
+    }
 
-  if (sum == 0.0f) {
-    av_log(ctx, AV_LOG_ERROR, "Division by zero in softmax\n");
-    return AVERROR(EINVAL);
-  }
+    // Apply logit scale
+    for (size_t i = 0; i < input_len; i++) {
+        input[i] *= logit_scale;
+    }
 
-  offset = m + temperature * logf(sum);
-  for (size_t i = 0; i < input_len; i++) {
-    input[i] = expf((input[i] - offset) / temperature);
-  }
+    m = input[0];
+    for (size_t i = 1; i < input_len; i++) {
+        if (input[i] > m) {
+            m = input[i];
+        }
+    }
 
-  return 0;
+    sum = 0.0f;
+    for (size_t i = 0; i < input_len; i++) {
+        sum += expf((input[i] - m) / temperature);
+    }
+
+    if (sum == 0.0f) {
+        av_log(ctx, AV_LOG_ERROR, "Division by zero in softmax\n");
+        return AVERROR(EINVAL);
+    }
+
+    offset = m + temperature * logf(sum);
+    for (size_t i = 0; i < input_len; i++) {
+        input[i] = expf((input[i] - offset) / temperature);
+    }
+
+    return 0;
 }
 
-static AVDetectionBBox *
-find_or_create_detection_bbox(AVFrame *frame, uint32_t bbox_index,
-                              AVFilterContext *filter_ctx,
-                              DnnClassifyContext *ctx) {
-  AVFrameSideData *sd;
-  AVDetectionBBoxHeader *header;
-  AVDetectionBBox *bbox;
+static AVDetectionBBox *find_or_create_detection_bbox(
+    AVFrame *frame, uint32_t bbox_index, AVFilterContext *filter_ctx,
+    DnnClassifyContext *ctx)
+{
+    AVFrameSideData *sd;
+    AVDetectionBBoxHeader *header;
+    AVDetectionBBox *bbox;
 
-  sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-  if (!sd) {
-    header = av_detection_bbox_create_side_data(frame, 1);
-    if (!header) {
-      av_log(filter_ctx, AV_LOG_ERROR,
-             "Cannot get side data in labels processing\n");
-      return NULL;
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
+    if (!sd) {
+        header = av_detection_bbox_create_side_data(frame, 1);
+        if (!header) {
+            av_log(filter_ctx, AV_LOG_ERROR,
+                   "Cannot get side data in labels processing\n");
+            return NULL;
+        }
+    } else {
+        header = (AVDetectionBBoxHeader *)sd->data;
     }
-  } else {
-    header = (AVDetectionBBoxHeader *)sd->data;
-  }
 
-  if (bbox_index == 0) {
-    av_strlcat(header->source, ", ", sizeof(header->source));
-    av_strlcat(header->source, ctx->dnnctx.model_filename,
-               sizeof(header->source));
-  }
+    if (bbox_index == 0) {
+        av_strlcat(header->source, ", ", sizeof(header->source));
+        av_strlcat(header->source, ctx->dnnctx.model_filename,
+                   sizeof(header->source));
+    }
 
-  // Get bbox for current index
-  bbox = av_get_detection_bbox(header, bbox_index);
-  if (!bbox) {
-    av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", bbox_index);
-    return NULL;
-  }
+    // Get bbox for current index
+    bbox = av_get_detection_bbox(header, bbox_index);
+    if (!bbox) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to get bbox %d\n", bbox_index);
+        return NULL;
+    }
 
-  return bbox;
+    return bbox;
 }
 
 static int fill_bbox_with_best_labels(DnnClassifyContext *ctx, char **labels,
                                       float *probabilities, int num_labels,
                                       AVDetectionBBox *bbox,
                                       int max_classes_per_box,
-                                      float confidence_threshold) {
-  int i, j, minpos, ret;
-  float min;
+                                      float confidence_threshold)
+{
+    int i, j, minpos, ret;
+    float min;
 
-  if (!labels || !probabilities || !bbox) {
-    return AVERROR(EINVAL);
-  }
-
-  for (i = 0; i < num_labels; i++) {
-    if (probabilities[i] >= confidence_threshold) {
-      if (bbox->classify_count >= max_classes_per_box) {
-        // Find lowest probability classification
-        min = av_q2d(bbox->classify_confidences[0]);
-        minpos = 0;
-        for (j = 1; j < bbox->classify_count; j++) {
-          float prob = av_q2d(bbox->classify_confidences[j]);
-          if (prob < min) {
-            min = prob;
-            minpos = j;
-          }
-        }
-
-        if (probabilities[i] > min) {
-          ret = set_prob_and_label_of_bbox(bbox, labels[i], minpos,
-                                           probabilities[i]);
-          if (ret < 0)
-            return ret;
-        }
-      } else {
-        ret = set_prob_and_label_of_bbox(bbox, labels[i], bbox->classify_count,
-                                         probabilities[i]);
-        if (ret < 0)
-          return ret;
-        bbox->classify_count++;
-      }
+    if (!labels || !probabilities || !bbox) {
+        return AVERROR(EINVAL);
     }
-  }
-  return 0;
+
+    for (i = 0; i < num_labels; i++) {
+        if (probabilities[i] >= confidence_threshold) {
+            if (bbox->classify_count >= max_classes_per_box) {
+                // Find lowest probability classification
+                min = av_q2d(bbox->classify_confidences[0]);
+                minpos = 0;
+                for (j = 1; j < bbox->classify_count; j++) {
+                    float prob = av_q2d(bbox->classify_confidences[j]);
+                    if (prob < min) {
+                        min = prob;
+                        minpos = j;
+                    }
+                }
+
+                if (probabilities[i] > min) {
+                    ret = set_prob_and_label_of_bbox(bbox, labels[i], minpos,
+                                                     probabilities[i]);
+                    if (ret < 0)
+                        return ret;
+                }
+            } else {
+                ret = set_prob_and_label_of_bbox(
+                    bbox, labels[i], bbox->classify_count, probabilities[i]);
+                if (ret < 0)
+                    return ret;
+                bbox->classify_count++;
+            }
+        }
+    }
+    return 0;
 }
 
 // Processing functions for standard classification (video only)
 static int post_proc_standard(AVFrame *frame, DNNData *output,
-                              uint32_t bbox_index,
-                              AVFilterContext *filter_ctx) {
-  DnnClassifyContext *ctx = filter_ctx->priv;
-  float conf_threshold = ctx->confidence;
-  AVDetectionBBoxHeader *header;
-  AVDetectionBBox *bbox;
-  float *classifications;
-  uint32_t label_id;
-  float confidence;
-  AVFrameSideData *sd;
-  int output_size = output->dims[3] * output->dims[2] * output->dims[1];
+                              uint32_t bbox_index, AVFilterContext *filter_ctx)
+{
+    DnnClassifyContext *ctx = filter_ctx->priv;
+    float conf_threshold = ctx->confidence;
+    AVDetectionBBoxHeader *header;
+    AVDetectionBBox *bbox;
+    float *classifications;
+    uint32_t label_id;
+    float confidence;
+    AVFrameSideData *sd;
+    int output_size = output->dims[3] * output->dims[2] * output->dims[1];
 
-  if (output_size <= 0) {
-    return -1;
-  }
-
-  sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-  if (!sd) {
-    av_log(filter_ctx, AV_LOG_ERROR,
-           "Cannot get side data in post_proc_standard\n");
-    return -1;
-  }
-  header = (AVDetectionBBoxHeader *)sd->data;
-
-  if (bbox_index == 0) {
-    av_strlcat(header->source, ", ", sizeof(header->source));
-    av_strlcat(header->source, ctx->dnnctx.model_filename,
-               sizeof(header->source));
-  }
-
-  classifications = output->data;
-  label_id = 0;
-  confidence = classifications[0];
-  for (int i = 1; i < output_size; i++) {
-    if (classifications[i] > confidence) {
-      label_id = i;
-      confidence = classifications[i];
+    if (output_size <= 0) {
+        return -1;
     }
-  }
 
-  if (confidence < conf_threshold) {
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
+    if (!sd) {
+        av_log(filter_ctx, AV_LOG_ERROR,
+               "Cannot get side data in post_proc_standard\n");
+        return -1;
+    }
+    header = (AVDetectionBBoxHeader *)sd->data;
+
+    if (bbox_index == 0) {
+        av_strlcat(header->source, ", ", sizeof(header->source));
+        av_strlcat(header->source, ctx->dnnctx.model_filename,
+                   sizeof(header->source));
+    }
+
+    classifications = output->data;
+    label_id = 0;
+    confidence = classifications[0];
+    for (int i = 1; i < output_size; i++) {
+        if (classifications[i] > confidence) {
+            label_id = i;
+            confidence = classifications[i];
+        }
+    }
+
+    if (confidence < conf_threshold) {
+        return 0;
+    }
+
+    bbox = av_get_detection_bbox(header, bbox_index);
+    bbox->classify_confidences[bbox->classify_count] =
+        av_make_q((int)(confidence * 10000), 10000);
+
+    if (ctx->label_classification_ctx->labels &&
+        label_id < ctx->label_classification_ctx->label_count) {
+        av_strlcpy(bbox->classify_labels[bbox->classify_count],
+                   ctx->label_classification_ctx->labels[label_id],
+                   sizeof(bbox->classify_labels[bbox->classify_count]));
+    } else {
+        snprintf(bbox->classify_labels[bbox->classify_count],
+                 sizeof(bbox->classify_labels[bbox->classify_count]), "%d",
+                 label_id);
+    }
+    bbox->classify_count++;
+
     return 0;
-  }
-
-  bbox = av_get_detection_bbox(header, bbox_index);
-  bbox->classify_confidences[bbox->classify_count] =
-      av_make_q((int)(confidence * 10000), 10000);
-
-  if (ctx->label_classification_ctx->labels &&
-      label_id < ctx->label_classification_ctx->label_count) {
-    av_strlcpy(bbox->classify_labels[bbox->classify_count],
-               ctx->label_classification_ctx->labels[label_id],
-               sizeof(bbox->classify_labels[bbox->classify_count]));
-  } else {
-    snprintf(bbox->classify_labels[bbox->classify_count],
-             sizeof(bbox->classify_labels[bbox->classify_count]), "%d",
-             label_id);
-  }
-  bbox->classify_count++;
-
-  return 0;
 }
 
 // Processing functions for CLIP/CLAP (both media types)
 static int post_proc_clxp_labels(AVFrame *frame, DNNData *output,
                                  uint32_t bbox_index,
-                                 AVFilterContext *filter_ctx) {
-  DnnClassifyContext *ctx = filter_ctx->priv;
-  const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
-  float *probabilities = (float *)output->data;
-  int num_labels = ctx->label_classification_ctx->label_count;
-  AVDetectionBBox *bbox;
-  float confidence_threshold = ctx->confidence;
-  int ret;
+                                 AVFilterContext *filter_ctx)
+{
+    DnnClassifyContext *ctx = filter_ctx->priv;
+    const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
+    float *probabilities = (float *)output->data;
+    int num_labels = ctx->label_classification_ctx->label_count;
+    AVDetectionBBox *bbox;
+    float confidence_threshold = ctx->confidence;
+    int ret;
 
-  // Apply softmax to probabilities
-  if (softmax(probabilities, num_labels, ctx->logit_scale, ctx->temperature,
-              filter_ctx) < 0) {
-    return AVERROR(EINVAL);
-  }
+    // Apply softmax to probabilities
+    if (softmax(probabilities, num_labels, ctx->logit_scale, ctx->temperature,
+                filter_ctx) < 0) {
+        return AVERROR(EINVAL);
+    }
 
-  // Get or create detection bbox
-  bbox = find_or_create_detection_bbox(frame, bbox_index, filter_ctx, ctx);
-  if (!bbox) {
-    return AVERROR(EINVAL);
-  }
+    // Get or create detection bbox
+    bbox = find_or_create_detection_bbox(frame, bbox_index, filter_ctx, ctx);
+    if (!bbox) {
+        return AVERROR(EINVAL);
+    }
 
-  ret = fill_bbox_with_best_labels(ctx, ctx->label_classification_ctx->labels,
-                                   probabilities, num_labels, bbox,
-                                   max_classes_per_box, confidence_threshold);
-  if (ret < 0) {
-    av_log(filter_ctx, AV_LOG_ERROR, "Failed to fill bbox with best labels\n");
-    return ret;
-  }
-  return 0;
+    ret = fill_bbox_with_best_labels(ctx, ctx->label_classification_ctx->labels,
+                                     probabilities, num_labels, bbox,
+                                     max_classes_per_box, confidence_threshold);
+    if (ret < 0) {
+        av_log(filter_ctx, AV_LOG_ERROR,
+               "Failed to fill bbox with best labels\n");
+        return ret;
+    }
+    return 0;
 }
 
 static int softmax_over_all_categories(DnnClassifyContext *ctx,
                                        AVFilterContext *filter_ctx,
-                                       float *probabilities) {
-  int prob_offset = 0;
-  CategoryClassifcationContext *cat_class_ctx =
-      ctx->category_classification_ctx;
+                                       float *probabilities)
+{
+    int prob_offset = 0;
+    CategoryClassifcationContext *cat_class_ctx =
+        ctx->category_classification_ctx;
 
-  for (int c = 0; c < cat_class_ctx->num_contexts; c++) {
-    CategoriesContext *categories_ctx = cat_class_ctx->category_units[c];
-    if (!categories_ctx) {
-      av_log(filter_ctx, AV_LOG_ERROR,
-             "Missing classification data at context %d\n", c);
-      continue;
+    for (int c = 0; c < cat_class_ctx->num_contexts; c++) {
+        CategoriesContext *categories_ctx = cat_class_ctx->category_units[c];
+        if (!categories_ctx) {
+            av_log(filter_ctx, AV_LOG_ERROR,
+                   "Missing classification data at context %d\n", c);
+            continue;
+        }
+        // Apply softmax only to the labels within this category
+        if (softmax(probabilities + prob_offset, categories_ctx->label_count,
+                    ctx->logit_scale, ctx->temperature, filter_ctx) < 0) {
+            return AVERROR(EINVAL);
+        }
+        prob_offset += categories_ctx->label_count;
     }
-    // Apply softmax only to the labels within this category
-    if (softmax(probabilities + prob_offset, categories_ctx->label_count,
-                ctx->logit_scale, ctx->temperature, filter_ctx) < 0) {
-      return AVERROR(EINVAL);
-    }
-    prob_offset += categories_ctx->label_count;
-  }
-  return 0;
+    return 0;
 }
 
 static CategoryContext *get_best_category(CategoriesContext *categories_ctx,
-                                          float *probabilities) {
-  CategoryContext *best_category = NULL;
-  float best_probability = -1.0f;
-  int prob_offset = 0;
+                                          float *probabilities)
+{
+    CategoryContext *best_category = NULL;
+    float best_probability = -1.0f;
+    int prob_offset = 0;
 
-  // Calculate total probability for each category
-  for (int cat_idx = 0; cat_idx < categories_ctx->category_count; cat_idx++) {
-    CategoryContext *category = &categories_ctx->categories[cat_idx];
+    // Calculate total probability for each category
+    for (int cat_idx = 0; cat_idx < categories_ctx->category_count; cat_idx++) {
+        CategoryContext *category = &categories_ctx->categories[cat_idx];
 
-    // Sum probabilities for all labels in this category
-    category->total_probability = 0.0f;
-    for (int label_idx = 0; label_idx < category->label_count; label_idx++) {
-      category->total_probability += probabilities[prob_offset + label_idx];
+        // Sum probabilities for all labels in this category
+        category->total_probability = 0.0f;
+        for (int label_idx = 0; label_idx < category->label_count;
+             label_idx++) {
+            category->total_probability +=
+                probabilities[prob_offset + label_idx];
+        }
+
+        if (category->total_probability > best_probability) {
+            best_probability = category->total_probability;
+            best_category = category;
+        }
+
+        prob_offset += category->label_count;
     }
 
-    if (category->total_probability > best_probability) {
-      best_probability = category->total_probability;
-      best_category = category;
-    }
-
-    prob_offset += category->label_count;
-  }
-
-  return best_category;
+    return best_category;
 }
 
 static int post_proc_clxp_categories(AVFrame *frame, DNNData *output,
                                      uint32_t bbox_index,
-                                     AVFilterContext *filter_ctx) {
-  DnnClassifyContext *ctx = filter_ctx->priv;
-  CategoryClassifcationContext *cat_class_ctx =
-      ctx->category_classification_ctx;
-  CategoryContext *best_category;
-  AVDetectionBBox *bbox;
-  float *probabilities = output->data;
-  int ret, prob_offset = 0;
-  char **ctx_labels;
-  float *ctx_probabilities;
+                                     AVFilterContext *filter_ctx)
+{
+    DnnClassifyContext *ctx = filter_ctx->priv;
+    CategoryClassifcationContext *cat_class_ctx =
+        ctx->category_classification_ctx;
+    CategoryContext *best_category;
+    AVDetectionBBox *bbox;
+    float *probabilities = output->data;
+    int ret, prob_offset = 0;
+    char **ctx_labels;
+    float *ctx_probabilities;
 
-  // Validate input data
-  if (!probabilities || !cat_class_ctx) {
-    av_log(filter_ctx, AV_LOG_ERROR, "Invalid input data\n");
-    return AVERROR(EINVAL);
-  }
-
-  // Apply softmax transformation
-  ret = softmax_over_all_categories(ctx, filter_ctx, probabilities);
-  if (ret < 0) {
-    return ret;
-  }
-
-  // Get or create detection bbox
-  bbox = find_or_create_detection_bbox(frame, bbox_index, filter_ctx, ctx);
-  if (!bbox) {
-    return AVERROR(EINVAL);
-  }
-
-  // Allocate temporary arrays
-  ctx_labels = av_malloc_array(cat_class_ctx->num_contexts, sizeof(char *));
-  if (!ctx_labels) {
-    return AVERROR(ENOMEM);
-  }
-
-  for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
-    ctx_labels[i] = av_mallocz(AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
-    if (!ctx_labels[i]) {
-      // Clean up previously allocated memory
-      for (int j = 0; j < i; j++) {
-        av_freep(&ctx_labels[j]);
-      }
-      av_freep(&ctx_labels);
-      return AVERROR(ENOMEM);
+    // Validate input data
+    if (!probabilities || !cat_class_ctx) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Invalid input data\n");
+        return AVERROR(EINVAL);
     }
-  }
 
-  ctx_probabilities =
-      av_malloc_array(cat_class_ctx->num_contexts, sizeof(float));
-  if (!ctx_probabilities) {
+    // Apply softmax transformation
+    ret = softmax_over_all_categories(ctx, filter_ctx, probabilities);
+    if (ret < 0) {
+        return ret;
+    }
+
+    // Get or create detection bbox
+    bbox = find_or_create_detection_bbox(frame, bbox_index, filter_ctx, ctx);
+    if (!bbox) {
+        return AVERROR(EINVAL);
+    }
+
+    // Allocate temporary arrays
+    ctx_labels = av_malloc_array(cat_class_ctx->num_contexts, sizeof(char *));
+    if (!ctx_labels) {
+        return AVERROR(ENOMEM);
+    }
+
+    for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
+        ctx_labels[i] = av_mallocz(AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+        if (!ctx_labels[i]) {
+            // Clean up previously allocated memory
+            for (int j = 0; j < i; j++) {
+                av_freep(&ctx_labels[j]);
+            }
+            av_freep(&ctx_labels);
+            return AVERROR(ENOMEM);
+        }
+    }
+
+    ctx_probabilities =
+        av_malloc_array(cat_class_ctx->num_contexts, sizeof(float));
+    if (!ctx_probabilities) {
+        // Clean up
+        for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
+            av_freep(&ctx_labels[i]);
+        }
+        av_freep(&ctx_labels);
+        return AVERROR(ENOMEM);
+    }
+
+    // Process each context
+    for (int ctx_idx = 0; ctx_idx < cat_class_ctx->num_contexts; ctx_idx++) {
+        CategoriesContext *categories_ctx =
+            cat_class_ctx->category_units[ctx_idx];
+        if (!categories_ctx) {
+            av_log(filter_ctx, AV_LOG_ERROR,
+                   "Missing classification data at context %d\n", ctx_idx);
+            continue;
+        }
+
+        // Find best category
+        best_category =
+            get_best_category(categories_ctx, probabilities + prob_offset);
+        if (!best_category || !best_category->name) {
+            av_log(filter_ctx, AV_LOG_ERROR,
+                   "Invalid best category at context %d\n", ctx_idx);
+            continue;
+        }
+
+        // Copy category name instead of assigning pointer
+        av_strlcpy(ctx_labels[ctx_idx], best_category->name,
+                   AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+        ctx_probabilities[ctx_idx] = best_category->total_probability;
+
+        prob_offset += categories_ctx->label_count;
+    }
+
+    // Fill bbox with best labels
+    ret = fill_bbox_with_best_labels(
+        ctx, ctx_labels, ctx_probabilities, cat_class_ctx->num_contexts, bbox,
+        AV_NUM_DETECTION_BBOX_CLASSIFY, ctx->confidence);
+
     // Clean up
     for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
-      av_freep(&ctx_labels[i]);
+        av_freep(&ctx_labels[i]);
     }
     av_freep(&ctx_labels);
-    return AVERROR(ENOMEM);
-  }
+    av_freep(&ctx_probabilities);
 
-  // Process each context
-  for (int ctx_idx = 0; ctx_idx < cat_class_ctx->num_contexts; ctx_idx++) {
-    CategoriesContext *categories_ctx = cat_class_ctx->category_units[ctx_idx];
-    if (!categories_ctx) {
-      av_log(filter_ctx, AV_LOG_ERROR,
-             "Missing classification data at context %d\n", ctx_idx);
-      continue;
-    }
-
-    // Find best category
-    best_category =
-        get_best_category(categories_ctx, probabilities + prob_offset);
-    if (!best_category || !best_category->name) {
-      av_log(filter_ctx, AV_LOG_ERROR, "Invalid best category at context %d\n",
-             ctx_idx);
-      continue;
-    }
-
-    // Copy category name instead of assigning pointer
-    av_strlcpy(ctx_labels[ctx_idx], best_category->name,
-               AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
-    ctx_probabilities[ctx_idx] = best_category->total_probability;
-
-    prob_offset += categories_ctx->label_count;
-  }
-
-  // Fill bbox with best labels
-  ret = fill_bbox_with_best_labels(
-      ctx, ctx_labels, ctx_probabilities, cat_class_ctx->num_contexts, bbox,
-      AV_NUM_DETECTION_BBOX_CLASSIFY, ctx->confidence);
-
-  // Clean up
-  for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
-    av_freep(&ctx_labels[i]);
-  }
-  av_freep(&ctx_labels);
-  av_freep(&ctx_probabilities);
-
-  return ret;
+    return ret;
 }
 
 static int dnn_classify_post_proc(AVFrame *frame, DNNData *output,
                                   uint32_t bbox_index,
-                                  AVFilterContext *filter_ctx) {
-  DnnClassifyContext *ctx = filter_ctx->priv;
+                                  AVFilterContext *filter_ctx)
+{
+    DnnClassifyContext *ctx = filter_ctx->priv;
 
-  if (!frame || !output || !output->data) {
-    av_log(filter_ctx, AV_LOG_ERROR, "Invalid input to post processing\n");
-    return AVERROR(EINVAL);
-  }
+    if (!frame || !output || !output->data) {
+        av_log(filter_ctx, AV_LOG_ERROR, "Invalid input to post processing\n");
+        return AVERROR(EINVAL);
+    }
 
-  // Choose post-processing based on backend and context
-  if (ctx->dnnctx.backend_type == DNN_TH) {
+    // Choose post-processing based on backend and context
+    if (ctx->dnnctx.backend_type == DNN_TH) {
+        if (ctx->category_classification_ctx) {
+            return post_proc_clxp_categories(frame, output, bbox_index,
+                                             filter_ctx);
+        } else if (ctx->label_classification_ctx) {
+            return post_proc_clxp_labels(frame, output, bbox_index, filter_ctx);
+        }
+        av_log(filter_ctx, AV_LOG_ERROR,
+               "No valid classification context available\n");
+        return AVERROR(EINVAL);
+    } else {
+        // Standard classification (video only)
+        return post_proc_standard(frame, output, bbox_index, filter_ctx);
+    }
+}
+
+static void free_contexts(DnnClassifyContext *ctx)
+{
+    if (!ctx)
+        return;
     if (ctx->category_classification_ctx) {
-      return post_proc_clxp_categories(frame, output, bbox_index, filter_ctx);
+        free_category_classfication_context(ctx->category_classification_ctx);
+        av_freep(&ctx->category_classification_ctx);
+        av_freep(&ctx->label_classification_ctx);
+        ctx->category_classification_ctx = NULL;
+        ctx->label_classification_ctx = NULL;
     } else if (ctx->label_classification_ctx) {
-      return post_proc_clxp_labels(frame, output, bbox_index, filter_ctx);
+        free_label_context(ctx->label_classification_ctx);
+        ctx->label_classification_ctx = NULL;
     }
-    av_log(filter_ctx, AV_LOG_ERROR,
-           "No valid classification context available\n");
-    return AVERROR(EINVAL);
-  } else {
-    // Standard classification (video only)
-    return post_proc_standard(frame, output, bbox_index, filter_ctx);
-  }
 }
 
-static void free_contexts(DnnClassifyContext *ctx) {
-  if (!ctx)
-    return;
-  if (ctx->category_classification_ctx) {
-    free_category_classfication_context(ctx->category_classification_ctx);
-    av_freep(&ctx->category_classification_ctx);
-    av_freep(&ctx->label_classification_ctx);
-    ctx->category_classification_ctx = NULL;
-    ctx->label_classification_ctx = NULL;
-  } else if (ctx->label_classification_ctx) {
-    free_label_context(ctx->label_classification_ctx);
-    ctx->label_classification_ctx = NULL;
-  }
-}
+static int config_input(AVFilterLink *inlink)
+{
+    AVFilterContext *context = inlink->dst;
+    DnnClassifyContext *ctx = context->priv;
+    AVFilterLink *outlink = context->outputs[0];
+    int ret;
+    DNNFunctionType goal_mode;
 
-static int config_input(AVFilterLink *inlink) {
-  AVFilterContext *context = inlink->dst;
-  DnnClassifyContext *ctx = context->priv;
-  AVFilterLink *outlink = context->outputs[0];
-  int ret;
-  DNNFunctionType goal_mode;
-
-  // Set media type based on is_audio flag
-  if (ctx->is_audio) {
-    ctx->type = AVMEDIA_TYPE_AUDIO;
-  } else {
-    ctx->type = inlink->type;
-  }
-
-  // Set the output link type to match the input link type
-  outlink->type = inlink->type;
-  outlink->w = inlink->w;
-  outlink->h = inlink->h;
-  outlink->sample_aspect_ratio = inlink->sample_aspect_ratio;
-  outlink->time_base = inlink->time_base;
-
-  // Validate media type
-  if (ctx->type != AVMEDIA_TYPE_AUDIO && ctx->type != AVMEDIA_TYPE_VIDEO) {
-    av_log(context, AV_LOG_ERROR,
-           "Invalid media type. Only audio or video is supported\n");
-    return AVERROR(EINVAL);
-  }
-
-  // Set type-specific parameters and check compatibility
-  if (ctx->type == AVMEDIA_TYPE_AUDIO) {
-    // Audio-specific settings
-    ctx->sample_rate = CLAP_SAMPLE_RATE;
-    ctx->samples_per_frame = CLAP_MIN_SAMPLES_PER_FRAME;
-    goal_mode = DFT_ANALYTICS_CLAP;
-
-    // Check backend compatibility
-    if (ctx->dnnctx.backend_type != DNN_TH) {
-      av_log(context, AV_LOG_ERROR,
-             "Audio classification requires Torch backend\n");
-      return AVERROR(EINVAL);
-    }
-
-    // Check sample rate
-    if (inlink->sample_rate != CLAP_SAMPLE_RATE) {
-      av_log(context, AV_LOG_ERROR,
-             "Invalid sample rate. CLAP requires 44100 Hz\n");
-      return AVERROR(EINVAL);
-    }
-
-    // Copy audio properties to output
-    outlink->sample_rate = inlink->sample_rate;
-    outlink->ch_layout = inlink->ch_layout;
-  } else {
-    // Video mode
-    goal_mode = (ctx->dnnctx.backend_type == DNN_TH) ? DFT_ANALYTICS_CLIP
-                                                     : DFT_ANALYTICS_CLASSIFY;
-  }
-  // Initialize label and category contexts based on provided files
-  if (ctx->dnnctx.backend_type == DNN_TH) {
-    if (ctx->labels_filename) {
-      ctx->label_classification_ctx = av_calloc(1, sizeof(LabelContext));
-      if (!ctx->label_classification_ctx)
-        return AVERROR(ENOMEM);
-
-      ret = read_label_file(context, ctx->label_classification_ctx,
-                            ctx->labels_filename,
-                            AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
-      if (ret < 0) {
-        av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
-        return ret;
-      }
-    } else if (ctx->categories_filename) {
-      ctx->category_classification_ctx =
-          av_calloc(1, sizeof(CategoryClassifcationContext));
-      if (!ctx->category_classification_ctx)
-        return AVERROR(ENOMEM);
-
-      ret = read_categories_file(context, ctx->category_classification_ctx,
-                                 ctx->categories_filename,
-                                 AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
-      if (ret < 0) {
-        av_log(context, AV_LOG_ERROR, "Failed to read categories file\n");
-        free_contexts(ctx);
-        return ret;
-      }
-
-      ret = combine_all_category_labels(&ctx->label_classification_ctx,
-                                        ctx->category_classification_ctx);
-      if (ret < 0) {
-        av_log(context, AV_LOG_ERROR, "Failed to combine labels\n");
-        free_contexts(ctx);
-        return ret;
-      }
-    }
-
-    // Initialize DNN with tokenizer for CLIP/CLAP models
-    ret = ff_dnn_init_with_tokenizer(&ctx->dnnctx, goal_mode,
-                                     ctx->label_classification_ctx->labels,
-                                     ctx->label_classification_ctx->label_count,
-                                     ctx->tokenizer_path, context);
-    if (ret < 0) {
-      free_contexts(ctx);
-      return ret;
-    }
-  } else if (ctx->dnnctx.backend_type == DNN_OV) {
-    // Initialize standard DNN for OpenVINO
-    ret = ff_dnn_init(&ctx->dnnctx, goal_mode, context);
-    if (ret < 0)
-      return ret;
-
-    // Read labels file
-    ctx->label_classification_ctx = av_calloc(1, sizeof(LabelContext));
-    if (!ctx->label_classification_ctx)
-      return AVERROR(ENOMEM);
-
-    ret = read_label_file(context, ctx->label_classification_ctx,
-                          ctx->labels_filename,
-                          AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
-    if (ret < 0) {
-      av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
-      free_contexts(ctx);
-      return ret;
-    }
-  }
-
-  // Set the post-processing callback
-  ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_classify_post_proc);
-  return 0;
-}
-
-static av_cold int dnn_classify_init(AVFilterContext *context) {
-  DnnClassifyContext *ctx = context->priv;
-  int ret;
-
-  // Create a static pad with the appropriate media type
-  AVFilterPad pad = {
-    .name = av_strdup("default"),
-    .type = ctx->is_audio ? AVMEDIA_TYPE_AUDIO : AVMEDIA_TYPE_VIDEO,
-    .config_props = config_input,
-  };
-  
-  ret = ff_append_inpad(context, &pad);
-  if (ret < 0)
-    return ret;
-
-  // Create a matching output pad
-  AVFilterPad outpad = {
-    .name = av_strdup("default"),
-    .type = ctx->is_audio ? AVMEDIA_TYPE_AUDIO : AVMEDIA_TYPE_VIDEO,
-  };
-  
-  ret = ff_append_outpad(context, &outpad);
-  if (ret < 0)
-    return ret;
-
-  // Check backend and file parameters (parameter validation only)
-  if (ctx->dnnctx.backend_type == DNN_TH) {
-    // Check CLIP/CLAP specific parameters
-    if (ctx->labels_filename && ctx->categories_filename) {
-      av_log(context, AV_LOG_ERROR,
-             "Labels and categories file cannot be used together\n");
-      return AVERROR(EINVAL);
-    }
-
-    if (!ctx->labels_filename && !ctx->categories_filename) {
-      av_log(context, AV_LOG_ERROR,
-             "Labels or categories file is required for classification\n");
-      return AVERROR(EINVAL);
-    }
-
-    if (!ctx->tokenizer_path) {
-      av_log(context, AV_LOG_ERROR,
-             "Tokenizer file is required for CLIP/CLAP classification\n");
-      return AVERROR(EINVAL);
-    }
-  } else if (ctx->dnnctx.backend_type == DNN_OV) {
-    // Check OpenVINO specific parameters
-    if (!ctx->labels_filename) {
-      av_log(context, AV_LOG_ERROR,
-             "Labels file is required for classification\n");
-      return AVERROR(EINVAL);
-    }
-
-    if (ctx->categories_filename) {
-      av_log(context, AV_LOG_ERROR,
-             "Categories file is only supported for CLIP/CLAP models\n");
-      return AVERROR(EINVAL);
-    }
-
-    // Audio classification is not supported with OpenVINO backend
+    // Set media type based on is_audio flag
     if (ctx->is_audio) {
-      av_log(context, AV_LOG_ERROR,
-             "Audio classification requires Torch backend\n");
-      return AVERROR(EINVAL);
+        ctx->type = AVMEDIA_TYPE_AUDIO;
+    } else {
+        ctx->type = inlink->type;
     }
-  }
-  return 0;
+
+    // Set the output link type to match the input link type
+    outlink->type = inlink->type;
+    outlink->w = inlink->w;
+    outlink->h = inlink->h;
+    outlink->sample_aspect_ratio = inlink->sample_aspect_ratio;
+    outlink->time_base = inlink->time_base;
+
+    // Validate media type
+    if (ctx->type != AVMEDIA_TYPE_AUDIO && ctx->type != AVMEDIA_TYPE_VIDEO) {
+        av_log(context, AV_LOG_ERROR,
+               "Invalid media type. Only audio or video is supported\n");
+        return AVERROR(EINVAL);
+    }
+
+    // Set type-specific parameters and check compatibility
+    if (ctx->type == AVMEDIA_TYPE_AUDIO) {
+        // Audio-specific settings
+        ctx->sample_rate = CLAP_SAMPLE_RATE;
+        ctx->samples_per_frame = CLAP_MIN_SAMPLES_PER_FRAME;
+        goal_mode = DFT_ANALYTICS_CLAP;
+
+        // Check backend compatibility
+        if (ctx->dnnctx.backend_type != DNN_TH) {
+            av_log(context, AV_LOG_ERROR,
+                   "Audio classification requires Torch backend\n");
+            return AVERROR(EINVAL);
+        }
+
+        // Check sample rate
+        if (inlink->sample_rate != CLAP_SAMPLE_RATE) {
+            av_log(context, AV_LOG_ERROR,
+                   "Invalid sample rate. CLAP requires 44100 Hz\n");
+            return AVERROR(EINVAL);
+        }
+
+        // Copy audio properties to output
+        outlink->sample_rate = inlink->sample_rate;
+        outlink->ch_layout = inlink->ch_layout;
+    } else {
+        // Video mode
+        goal_mode = (ctx->dnnctx.backend_type == DNN_TH)
+                        ? DFT_ANALYTICS_CLIP
+                        : DFT_ANALYTICS_CLASSIFY;
+    }
+    // Initialize label and category contexts based on provided files
+    if (ctx->dnnctx.backend_type == DNN_TH) {
+        if (ctx->labels_filename) {
+            ctx->label_classification_ctx = av_calloc(1, sizeof(LabelContext));
+            if (!ctx->label_classification_ctx)
+                return AVERROR(ENOMEM);
+
+            ret = read_label_file(context, ctx->label_classification_ctx,
+                                  ctx->labels_filename,
+                                  AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+            if (ret < 0) {
+                av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
+                return ret;
+            }
+        } else if (ctx->categories_filename) {
+            ctx->category_classification_ctx =
+                av_calloc(1, sizeof(CategoryClassifcationContext));
+            if (!ctx->category_classification_ctx)
+                return AVERROR(ENOMEM);
+
+            ret = read_categories_file(context, ctx->category_classification_ctx,
+                                     ctx->categories_filename,
+                                     AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+            if (ret < 0) {
+                av_log(context, AV_LOG_ERROR, "Failed to read categories file\n");
+                free_contexts(ctx);
+                return ret;
+            }
+
+            ret = combine_all_category_labels(&ctx->label_classification_ctx,
+                                              ctx->category_classification_ctx);
+            if (ret < 0) {
+                av_log(context, AV_LOG_ERROR, "Failed to combine labels\n");
+                free_contexts(ctx);
+                return ret;
+            }
+        }
+
+        // Initialize DNN with tokenizer for CLIP/CLAP models
+        ret = ff_dnn_init_with_tokenizer(
+            &ctx->dnnctx, goal_mode, ctx->label_classification_ctx->labels,
+            ctx->label_classification_ctx->label_count, ctx->tokenizer_path,
+            context);
+        if (ret < 0) {
+            free_contexts(ctx);
+            return ret;
+        }
+    } else if (ctx->dnnctx.backend_type == DNN_OV) {
+        // Initialize standard DNN for OpenVINO
+        ret = ff_dnn_init(&ctx->dnnctx, goal_mode, context);
+        if (ret < 0)
+            return ret;
+
+        // Read labels file
+        ctx->label_classification_ctx = av_calloc(1, sizeof(LabelContext));
+        if (!ctx->label_classification_ctx)
+            return AVERROR(ENOMEM);
+
+        ret = read_label_file(context, ctx->label_classification_ctx,
+                              ctx->labels_filename,
+                              AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+        if (ret < 0) {
+            av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
+            free_contexts(ctx);
+            return ret;
+        }
+    }
+
+    // Set the post-processing callback
+    ff_dnn_set_classify_post_proc(&ctx->dnnctx, dnn_classify_post_proc);
+    return 0;
 }
 
-static int query_formats(AVFilterContext *ctx) {
-  int ret;
-  // Get the type from the first input pad
-  enum AVMediaType type = ctx->inputs[0]->type;
+static av_cold int dnn_classify_init(AVFilterContext *context)
+{
+    DnnClassifyContext *ctx = context->priv;
+    int ret;
 
-  if (type == AVMEDIA_TYPE_VIDEO) {
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_RGB24,   AV_PIX_FMT_BGR24,   AV_PIX_FMT_GRAY8,
-        AV_PIX_FMT_GRAYF32, AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
-        AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
-        AV_PIX_FMT_NV12,    AV_PIX_FMT_NONE};
+    // Create a static pad with the appropriate media type
+    AVFilterPad pad = {
+        .name = av_strdup("default"),
+        .type = ctx->is_audio ? AVMEDIA_TYPE_AUDIO : AVMEDIA_TYPE_VIDEO,
+        .config_props = config_input,
+    };
 
-    ret = ff_set_common_formats(ctx, ff_make_format_list(pix_fmts));
+    ret = ff_append_inpad(context, &pad);
     if (ret < 0)
-      return ret;
-  } else if (type == AVMEDIA_TYPE_AUDIO) {
-    static const enum AVSampleFormat sample_fmts[] = {AV_SAMPLE_FMT_FLT,
-                                                      AV_SAMPLE_FMT_NONE};
+        return ret;
 
-    ret = ff_set_common_formats(ctx, ff_make_format_list(sample_fmts));
+    // Create a matching output pad
+    AVFilterPad outpad = {
+        .name = av_strdup("default"),
+        .type = ctx->is_audio ? AVMEDIA_TYPE_AUDIO : AVMEDIA_TYPE_VIDEO,
+    };
+
+    ret = ff_append_outpad(context, &outpad);
     if (ret < 0)
-      return ret;
+        return ret;
 
-    ret = ff_set_common_samplerates(
-        ctx, ff_make_format_list((const int[]){CLAP_SAMPLE_RATE, -1}));
-    if (ret < 0)
-      return ret;
+    // Check backend and file parameters (parameter validation only)
+    if (ctx->dnnctx.backend_type == DNN_TH) {
+        // Check CLIP/CLAP specific parameters
+        if (ctx->labels_filename && ctx->categories_filename) {
+            av_log(context, AV_LOG_ERROR,
+                   "Labels and categories file cannot be used together\n");
+            return AVERROR(EINVAL);
+        }
 
-    ret = ff_set_common_channel_layouts(ctx, ff_all_channel_layouts());
-    if (ret < 0)
-      return ret;
-  } else {
-    av_log(ctx, AV_LOG_ERROR, "Unsupported media type: %d\n", type);
-    return AVERROR(EINVAL);
-  }
+        if (!ctx->labels_filename && !ctx->categories_filename) {
+            av_log(
+                context, AV_LOG_ERROR,
+                "Labels or categories file is required for classification\n");
+            return AVERROR(EINVAL);
+        }
 
-  return 0;
+        if (!ctx->tokenizer_path) {
+            av_log(context, AV_LOG_ERROR,
+                   "Tokenizer file is required for CLIP/CLAP classification\n");
+            return AVERROR(EINVAL);
+        }
+    } else if (ctx->dnnctx.backend_type == DNN_OV) {
+        // Check OpenVINO specific parameters
+        if (!ctx->labels_filename) {
+            av_log(context, AV_LOG_ERROR,
+                   "Labels file is required for classification\n");
+            return AVERROR(EINVAL);
+        }
+
+        if (ctx->categories_filename) {
+            av_log(context, AV_LOG_ERROR,
+                   "Categories file is only supported for CLIP/CLAP models\n");
+            return AVERROR(EINVAL);
+        }
+
+        // Audio classification is not supported with OpenVINO backend
+        if (ctx->is_audio) {
+            av_log(context, AV_LOG_ERROR,
+                   "Audio classification requires Torch backend\n");
+            return AVERROR(EINVAL);
+        }
+    }
+    return 0;
+}
+
+static int query_formats(AVFilterContext *ctx)
+{
+    int ret;
+    // Get the type from the first input pad
+    enum AVMediaType type = ctx->inputs[0]->type;
+
+    if (type == AVMEDIA_TYPE_VIDEO) {
+        static const enum AVPixelFormat pix_fmts[] = {
+            AV_PIX_FMT_RGB24,   AV_PIX_FMT_BGR24,   AV_PIX_FMT_GRAY8,
+            AV_PIX_FMT_GRAYF32, AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
+            AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
+            AV_PIX_FMT_NV12,    AV_PIX_FMT_NONE};
+
+        ret = ff_set_common_formats(ctx, ff_make_format_list(pix_fmts));
+        if (ret < 0)
+            return ret;
+    } else if (type == AVMEDIA_TYPE_AUDIO) {
+        static const enum AVSampleFormat sample_fmts[] = {AV_SAMPLE_FMT_FLT,
+                                                          AV_SAMPLE_FMT_NONE};
+
+        ret = ff_set_common_formats(ctx, ff_make_format_list(sample_fmts));
+        if (ret < 0)
+            return ret;
+
+        ret = ff_set_common_samplerates(
+            ctx, ff_make_format_list((const int[]){CLAP_SAMPLE_RATE, -1}));
+        if (ret < 0)
+            return ret;
+
+        ret = ff_set_common_channel_layouts(ctx, ff_all_channel_layouts());
+        if (ret < 0)
+            return ret;
+    } else {
+        av_log(ctx, AV_LOG_ERROR, "Unsupported media type: %d\n", type);
+        return AVERROR(EINVAL);
+    }
+
+    return 0;
 }
 static int dnn_classify_flush_frame(AVFilterLink *outlink, int64_t pts,
-                                    int64_t *out_pts) {
-  AVFilterContext *context = outlink->src;
-  DnnClassifyContext *ctx = context->priv;
-  int ret;
-  DNNAsyncStatusType async_state;
+                                    int64_t *out_pts)
+{
+    AVFilterContext *context = outlink->src;
+    DnnClassifyContext *ctx = context->priv;
+    int ret;
+    DNNAsyncStatusType async_state;
 
-  ret = ff_dnn_flush(&ctx->dnnctx);
-  if (ret != 0) {
-    return -1;
-  }
-
-  do {
-    AVFrame *in_frame = NULL;
-    AVFrame *out_frame = NULL;
-    async_state = ff_dnn_get_result(&ctx->dnnctx, &in_frame, &out_frame);
-    if (async_state == DAST_SUCCESS) {
-      ret = ff_filter_frame(outlink, in_frame);
-      if (ret < 0)
-        return ret;
-      if (out_pts)
-        *out_pts = in_frame->pts + pts;
+    ret = ff_dnn_flush(&ctx->dnnctx);
+    if (ret != 0) {
+        return -1;
     }
-    av_usleep(5000);
-  } while (async_state >= DAST_NOT_READY);
 
-  return 0;
+    do {
+        AVFrame *in_frame = NULL;
+        AVFrame *out_frame = NULL;
+        async_state = ff_dnn_get_result(&ctx->dnnctx, &in_frame, &out_frame);
+        if (async_state == DAST_SUCCESS) {
+            ret = ff_filter_frame(outlink, in_frame);
+            if (ret < 0)
+                return ret;
+            if (out_pts)
+                *out_pts = in_frame->pts + pts;
+        }
+        av_usleep(5000);
+    } while (async_state >= DAST_NOT_READY);
+
+    return 0;
 }
 
-static int process_video_frame(AVFilterContext *context, AVFrame *frame) {
-  DnnClassifyContext *ctx = context->priv;
-  int ret;
+static int process_video_frame(AVFilterContext *context, AVFrame *frame)
+{
+    DnnClassifyContext *ctx = context->priv;
+    int ret;
 
-  if (ctx->dnnctx.backend_type == DNN_TH) {
+    if (ctx->dnnctx.backend_type == DNN_TH) {
+        ret = ff_dnn_execute_model_clxp(
+            &ctx->dnnctx, frame, NULL, ctx->label_classification_ctx->labels,
+            ctx->label_classification_ctx->label_count, ctx->tokenizer_path,
+            ctx->target);
+    } else {
+        ret = ff_dnn_execute_model_classification(&ctx->dnnctx, frame, NULL,
+                                                  ctx->target);
+    }
+
+    if (ret != 0) {
+        av_frame_free(&frame);
+        return AVERROR(EIO);
+    }
+
+    return 0;
+}
+
+static int process_audio_frame(AVFilterContext *context, AVFrame *frame)
+{
+    DnnClassifyContext *ctx = context->priv;
+    int ret;
+
+    if (frame->nb_samples < CLAP_MIN_SAMPLES_PER_FRAME) {
+        av_log(context, AV_LOG_WARNING,
+               "Audio frame too short for CLAP analysis (needs %d samples, got "
+               "%d)\n",
+               CLAP_MIN_SAMPLES_PER_FRAME, frame->nb_samples);
+        return 0;
+    }
+
     ret = ff_dnn_execute_model_clxp(&ctx->dnnctx, frame, NULL,
                                     ctx->label_classification_ctx->labels,
                                     ctx->label_classification_ctx->label_count,
                                     ctx->tokenizer_path, ctx->target);
-  } else {
-    ret = ff_dnn_execute_model_classification(&ctx->dnnctx, frame, NULL,
-                                              ctx->target);
-  }
 
-  if (ret != 0) {
-    av_frame_free(&frame);
-    return AVERROR(EIO);
-  }
+    if (ret != 0) {
+        av_frame_free(&frame);
+        return AVERROR(EIO);
+    }
 
-  return 0;
-}
-
-static int process_audio_frame(AVFilterContext *context, AVFrame *frame) {
-  DnnClassifyContext *ctx = context->priv;
-  int ret;
-
-  if (frame->nb_samples < CLAP_MIN_SAMPLES_PER_FRAME) {
-    av_log(
-        context, AV_LOG_WARNING,
-        "Audio frame too short for CLAP analysis (needs %d samples, got %d)\n",
-        CLAP_MIN_SAMPLES_PER_FRAME, frame->nb_samples);
     return 0;
-  }
-
-  ret = ff_dnn_execute_model_clxp(&ctx->dnnctx, frame, NULL,
-                                  ctx->label_classification_ctx->labels,
-                                  ctx->label_classification_ctx->label_count,
-                                  ctx->tokenizer_path, ctx->target);
-
-  if (ret != 0) {
-    av_frame_free(&frame);
-    return AVERROR(EIO);
-  }
-
-  return 0;
 }
 
-static int dnn_classify_activate(AVFilterContext *context) {
-  DnnClassifyContext *ctx = context->priv;
-  AVFilterLink *inlink = context->inputs[0];
-  AVFilterLink *outlink = context->outputs[0];
-  int ret, status;
-  int64_t pts;
-  AVFrame *in = NULL;
-  int got_frame = 0;
-  DNNAsyncStatusType async_state;
+static int dnn_classify_activate(AVFilterContext *context)
+{
+    DnnClassifyContext *ctx = context->priv;
+    AVFilterLink *inlink = context->inputs[0];
+    AVFilterLink *outlink = context->outputs[0];
+    int ret, status;
+    int64_t pts;
+    AVFrame *in = NULL;
+    int got_frame = 0;
+    DNNAsyncStatusType async_state;
 
-  // Check for EOF or other status
-  if (ff_inlink_acknowledge_status(inlink, &status, &pts)) {
-    if (status == AVERROR_EOF) {
-      int64_t out_pts = pts;
-      ret = dnn_classify_flush_frame(outlink, pts, &out_pts);
-      ff_outlink_set_status(outlink, status, out_pts);
-      return ret;
-    }
-  }
-
-  // Process frames
-  ret = ff_inlink_consume_frame(inlink, &in);
-  if (ret < 0)
-    return ret;
-  if (ret > 0) {
-    // Process frame based on media type
-    if (ctx->type == AVMEDIA_TYPE_VIDEO) {
-      ret = process_video_frame(context, in);
-    } else {
-      ret = process_audio_frame(context, in);
+    // Check for EOF or other status
+    if (ff_inlink_acknowledge_status(inlink, &status, &pts)) {
+        if (status == AVERROR_EOF) {
+            int64_t out_pts = pts;
+            ret = dnn_classify_flush_frame(outlink, pts, &out_pts);
+            ff_outlink_set_status(outlink, status, out_pts);
+            return ret;
+        }
     }
 
-    if (ret < 0) {
-      av_frame_free(&in);
-      return ret;
-    }
-  }
-
-  // Get processed results
-  do {
-    AVFrame *in_frame = NULL;
-    AVFrame *out_frame = NULL;
-    async_state = ff_dnn_get_result(&ctx->dnnctx, &in_frame, &out_frame);
-    if (async_state == DAST_SUCCESS) {
-      ret = ff_filter_frame(outlink, in_frame);
-      if (ret < 0)
+    // Process frames
+    ret = ff_inlink_consume_frame(inlink, &in);
+    if (ret < 0)
         return ret;
-      got_frame = 1;
+    if (ret > 0) {
+        // Process frame based on media type
+        if (ctx->type == AVMEDIA_TYPE_VIDEO) {
+            ret = process_video_frame(context, in);
+        } else {
+            ret = process_audio_frame(context, in);
+        }
+
+        if (ret < 0) {
+            av_frame_free(&in);
+            return ret;
+        }
     }
-  } while (async_state == DAST_SUCCESS);
 
-  if (got_frame)
-    return 0;
+    // Get processed results
+    do {
+        AVFrame *in_frame = NULL;
+        AVFrame *out_frame = NULL;
+        async_state = ff_dnn_get_result(&ctx->dnnctx, &in_frame, &out_frame);
+        if (async_state == DAST_SUCCESS) {
+            ret = ff_filter_frame(outlink, in_frame);
+            if (ret < 0)
+                return ret;
+            got_frame = 1;
+        }
+    } while (async_state == DAST_SUCCESS);
 
-  // Request more frames if needed
-  if (ff_outlink_frame_wanted(outlink))
-    ff_inlink_request_frame(inlink);
+    if (got_frame)
+        return 0;
 
-  return FFERROR_NOT_READY;
+    // Request more frames if needed
+    if (ff_outlink_frame_wanted(outlink))
+        ff_inlink_request_frame(inlink);
+
+    return FFERROR_NOT_READY;
 }
 
-static av_cold void dnn_classify_uninit(AVFilterContext *context) {
-  DnnClassifyContext *ctx = context->priv;
-  ff_dnn_uninit(&ctx->dnnctx);
-  free_contexts(ctx);
+static av_cold void dnn_classify_uninit(AVFilterContext *context)
+{
+    DnnClassifyContext *ctx = context->priv;
+    ff_dnn_uninit(&ctx->dnnctx);
+    free_contexts(ctx);
 }
 
 const FFFilter ff_avf_dnn_classify = {
