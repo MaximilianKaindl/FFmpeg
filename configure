@@ -285,7 +285,6 @@ External library support:
   --enable-libtls          enable LibreSSL (via libtls), needed for https support
                            if openssl, gnutls or mbedtls is not used [no]
   --enable-libtorch        enable Torch as one DNN backend [no]
-  --enable-libtorch_cuda   enable Torch as one DNN backend with CUDA [no]
   --enable-libtokenizers   enable tokenizers-cpp library [no]
   --enable-libtwolame      enable MP2 encoding via libtwolame [no]
   --enable-libuavs3d       enable AVS3 decoding via libuavs3d [no]
@@ -2546,6 +2545,7 @@ HAVE_LIST="
     texi2html
     xmllint
     zlib_gzip
+    libtorch_cuda
     openvino2
 "
 
@@ -2875,7 +2875,7 @@ dirac_parse_select="golomb"
 dovi_rpudec_select="golomb"
 dovi_rpuenc_select="golomb"
 dnn_deps="avformat swscale"
-dnn_deps_any="libtensorflow libopenvino libtorch libtorch_cuda libtokenizers"
+dnn_deps_any="libtensorflow libopenvino libtorch libtokenizers"
 error_resilience_select="me_cmp"
 evcparse_select="golomb"
 faandct_deps="faan"
@@ -7047,8 +7047,7 @@ enabled libtensorflow     && require libtensorflow tensorflow/c/c_api.h TF_Versi
 enabled libtesseract      && require_pkg_config libtesseract tesseract tesseract/capi.h TessBaseAPICreate
 enabled libtheora         && require libtheora theora/theoraenc.h th_info_init -ltheoraenc -ltheoradec -logg
 enabled libtls            && require_pkg_config libtls libtls tls.h tls_configure
-enabled libtorch          && check_cxxflags -std=c++17 && require_cpp libtorch torch/torch.h "torch::Tensor" -ltorch -lc10 -ltorch_cpu -lstdc++ -lpthread
-enabled libtorch_cuda     && check_cxxflags -std=c++17
+enabled libtorch          && check_cxxflags -std=c++17 && require_cpp libtorch torch/torch.h "torch::Tensor" -ltorch -lc10 -ltorch_cpu -lstdc++ -lpthread && { check_lib_cpp libtorch_cuda torch/cuda.h -lc10_cuda -ltorch_cuda && enable libtorch_cuda; }
 enabled libtokenizers     && check_cxxflags -std=c++17 && require_cpp libtokenizers "tokenizers_cpp.h tokenizers_c.h" "" -ltokenizers_cpp -ltokenizers_c -lstdc++
 enabled libtwolame        && require libtwolame twolame.h twolame_init -ltwolame &&
                              { check_lib libtwolame twolame.h twolame_encode_buffer_float32_interleaved -ltwolame ||

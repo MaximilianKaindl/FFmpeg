@@ -45,8 +45,8 @@
 
  #include <torch/torch.h>
  #include <torch/script.h>
- 
- #if (CONFIG_LIBTORCH_CUDA == 1)
+
+ #if (HAVE_LIBTORCH_CUDA == 1)
  #include <c10/cuda/CUDAStream.h>
  #include <ATen/cuda/CUDAContext.h>
  #endif
@@ -63,7 +63,7 @@
     torch::jit::Module *jit_model;
     SafeQueue *request_queue;
     Queue *task_queue;
-    Queue *lltask_queue;       
+    Queue *lltask_queue;
 
     THClipContext *clip_ctx;
 
@@ -76,7 +76,7 @@ typedef struct THInferRequest {
 
 typedef struct THRequestItem {
     THInferRequest *infer_request;
-    LastLevelTaskItem **lltasks;    
+    LastLevelTaskItem **lltasks;
     int lltask_count;
     DNNAsyncExecModule exec_module;
 } THRequestItem;
@@ -88,12 +88,12 @@ typedef struct THRequestItem {
      { "optimize", "turn on graph executor optimization", OFFSET(optimize), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, FLAGS},
      { NULL }
  };
- 
+
  static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Queue *lltask_queue, DNNExecBaseParams *exec_params)
  {
      THModel *th_model = (THModel *)task->model;
      DnnContext *ctx = th_model->ctx;
- 
+
      switch(func_type){
      case DFT_PROCESS_FRAME:
      case DFT_ANALYTICS_CLAP:
@@ -121,7 +121,7 @@ typedef struct THRequestItem {
          AVFrameSideData *sd;
          LastLevelTaskItem *lltask;
          DNNExecZeroShotClassificationParams *params = (DNNExecZeroShotClassificationParams *)exec_params;
- 
+
          if(params->target == NULL){
              LastLevelTaskItem *lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
              if (!lltask) {
@@ -139,28 +139,28 @@ typedef struct THRequestItem {
              }
              return 0;
          }
- 
+
          task->inference_todo = 0;
          task->inference_done = 0;
- 
+
          if (!ff_dnn_contain_valid_detection_bbox(frame)) {
              return 0;
          }
- 
+
          sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
          header = (const AVDetectionBBoxHeader *)sd->data;
- 
+
          for (uint32_t i = 0; i < header->nb_bboxes; i++) {
              const AVDetectionBBox *bbox = av_get_detection_bbox(header, i);
              if (bbox->w * bbox->h <= 0) {
-                 continue;  
+                 continue;
              }
              if (params->target) {
                  if (av_strncasecmp(bbox->detect_label, params->target, sizeof(bbox->detect_label)) != 0) {
                      continue;
                  }
              }
- 
+
              lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
              if (!lltask) {
                  return AVERROR(ENOMEM);
@@ -182,7 +182,7 @@ typedef struct THRequestItem {
      }
      }
  }
- 
+
  static void th_free_request(THInferRequest *request)
  {
      if (!request)
@@ -197,7 +197,7 @@ typedef struct THRequestItem {
      }
      return;
  }
- 
+
  static inline void destroy_request_item(THRequestItem **arg)
  {
      THRequestItem *item;
@@ -225,26 +225,26 @@ typedef struct THRequestItem {
     }
     av_freep(&clip_ctx);
 }
- 
+
  static void dnn_free_model_th(DNNModel **model)
  {
      THModel *th_model;
      if (!model || !*model)
          return;
- 
+
      th_model = (THModel *) (*model);
      while (ff_safe_queue_size(th_model->request_queue) != 0) {
          THRequestItem *item = (THRequestItem *)ff_safe_queue_pop_front(th_model->request_queue);
          destroy_request_item(&item);
      }
      ff_safe_queue_destroy(th_model->request_queue);
- 
+
      while (ff_queue_size(th_model->lltask_queue) != 0) {
          LastLevelTaskItem *item = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
          av_freep(&item);
      }
      ff_queue_destroy(th_model->lltask_queue);
- 
+
      while (ff_queue_size(th_model->task_queue) != 0) {
          TaskItem *item = (TaskItem *)ff_queue_pop_front(th_model->task_queue);
          av_frame_free(&item->in_frame);
@@ -259,7 +259,7 @@ typedef struct THRequestItem {
      av_freep(&th_model);
      *model = NULL;
  }
- 
+
  static int get_input_th(DNNModel *model, DNNData *input, const char *input_name)
  {
      input->dt = DNN_FLOAT;
@@ -271,12 +271,12 @@ typedef struct THRequestItem {
      input->dims[3] = -1;
      return 0;
  }
- 
+
  static void deleter(void *arg)
  {
      av_freep(&arg);
  }
- 
+
  static int get_clip_input_res(THModel *th_model, const c10::Device &device) {
     // Common CLIP input dimensions to test
     std::vector<int64_t> test_dims[] = {
@@ -314,43 +314,43 @@ typedef struct THRequestItem {
 }
 
  #if (CONFIG_LIBTOKENIZERS == 1)
- 
+
  static int get_tokenized_batch(THClipContext *clip_ctx, const char **labels,
                              int label_count, const char *tokenizer_path,
                              DnnContext *ctx, const c10::Device &device) {
      int **tokens_array = NULL;
      int *token_counts = NULL;
      int ret;
- 
+
      if (!labels || label_count <= 0) {
          av_log(ctx, AV_LOG_ERROR, "Label file invalid.\n");
          return AVERROR(EINVAL);
      }
- 
+
      if (!tokenizer_path) {
          av_log(ctx, AV_LOG_ERROR, "Tokenizer path not provided.\n");
          return AVERROR(EINVAL);
      }
- 
+
      ret = ff_dnn_create_tokenizer_and_encode_batch(
          tokenizer_path, labels, label_count, &tokens_array, &token_counts, ctx);
- 
+
      if (ret < 0) {
          av_log(ctx, AV_LOG_ERROR, "Failed to tokenize batch text\n");
          return ret;
      }
- 
+
      // Create tensors for tokens and attention mask
      std::vector<torch::Tensor> tokens_tensors;
      std::vector<torch::Tensor> attention_tensors;
- 
+
      for (int i = 0; i < label_count; i++) {
          std::vector<int64_t> current_tokens;
          std::vector<int64_t> current_attention;
- 
+
          current_tokens.reserve(CLXP_EMBEDDING_DIMS);
          current_attention.reserve(CLXP_EMBEDDING_DIMS);
- 
+
          for (int j = 0; j < CLXP_EMBEDDING_DIMS; j++) {
              if (j < token_counts[i]) {
                  current_tokens.push_back(static_cast<int64_t>(tokens_array[i][j]));
@@ -360,16 +360,16 @@ typedef struct THRequestItem {
                  current_attention.push_back(0); // Padding for attention mask
              }
          }
- 
+
          tokens_tensors.push_back(torch::tensor(current_tokens, torch::kInt64));
          attention_tensors.push_back(
              torch::tensor(current_attention, torch::kInt64));
      }
- 
+
      // Stack all tensors into batches
      clip_ctx->tokenized_text = new torch::Tensor(torch::stack(tokens_tensors));
      clip_ctx->attention_mask = new torch::Tensor(torch::stack(attention_tensors));
- 
+
      // Move tensors to the appropriate device
      if (clip_ctx->tokenized_text->device() != device) {
          *clip_ctx->tokenized_text = clip_ctx->tokenized_text->to(device);
@@ -377,14 +377,14 @@ typedef struct THRequestItem {
      if (clip_ctx->attention_mask->device() != device) {
          *clip_ctx->attention_mask = clip_ctx->attention_mask->to(device);
      }
- 
+
      // Free allocated memory
      ff_dnn_tokenizer_free_batch(tokens_array, label_count);
      av_freep(&token_counts);
- 
+
      return 0;
  }
- 
+
  static int init_clxp_model(THModel *th_model, DNNFunctionType func_type,
                          const char **labels, int label_count,
                          const char *tokenizer_path,
@@ -437,15 +437,15 @@ typedef struct THRequestItem {
      DnnContext *ctx = th_model->ctx;
      float *audio_data = NULL;
      int nb_samples = 0;
- 
+
      int target_samples = CLAP_SAMPLE_RATE * CLAP_SAMPLE_DURATION_SECONDS;
- 
+
      audio_data = (float *)task->in_frame->data[0];
      nb_samples = task->in_frame->nb_samples;
- 
+
      // Calculate batch size dynamically based on available samples
      int batch_size = nb_samples / target_samples;
- 
+
      // Check if we have enough samples for at least one batch
      if (batch_size < 1) {
          av_log(ctx, AV_LOG_ERROR,
@@ -453,16 +453,16 @@ typedef struct THRequestItem {
              nb_samples, target_samples);
          return AVERROR(EINVAL);
      }
- 
+
      av_log(ctx, AV_LOG_INFO, "Dynamically calculated batch size: %d\n",
              batch_size);
- 
+
      // Check if frame already has the target sample rate
      if (task->in_frame->sample_rate == CLAP_SAMPLE_RATE &&
          task->in_frame->format == AV_SAMPLE_FMT_FLT) {
          // No resampling needed
      }
- 
+
      try {
          // Create input tensor with batch dimension {batch_size, target_samples}
          *infer_request->input_tensor =
@@ -473,10 +473,10 @@ typedef struct THRequestItem {
          av_log(ctx, AV_LOG_ERROR, "Audio encoding error: %s\n", e.what());
          return AVERROR(EINVAL);
      }
- 
+
      return 0;
  }
- 
+
  static int preprocess_image_tensor(const THModel *th_model,
                                  torch::Tensor *input_tensor,
                                  const c10::Device &device) {
@@ -498,7 +498,7 @@ typedef struct THRequestItem {
          return AVERROR(EINVAL);
      }
  }
- 
+
  static int fill_model_input_th(THModel *th_model, THRequestItem *request)
  {
      LastLevelTaskItem *lltask = NULL;
@@ -508,7 +508,7 @@ typedef struct THRequestItem {
      DnnContext *ctx = th_model->ctx;
      int ret, width_idx, height_idx, channel_idx;
      std::vector<torch::Tensor> batch_tensors;
- 
+
      ret = get_input_th(&th_model->model, &input, NULL);
      if ( ret != 0) {
          goto err;
@@ -518,7 +518,7 @@ typedef struct THRequestItem {
      channel_idx = dnn_get_channel_idx_by_layout(input.layout);
      infer_request->input_tensor = new torch::Tensor();
      infer_request->output = new torch::Tensor();
- 
+
      if(th_model->model.func_type == DFT_ANALYTICS_CLAP){
          lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
          if (!lltask) {
@@ -528,7 +528,7 @@ typedef struct THRequestItem {
          task = lltask->task;
          return prepare_audio_tensor(th_model,request);
      }
- 
+
      while (ff_queue_size(th_model->lltask_queue) != 0) {
          lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
          if (!lltask) {
@@ -536,7 +536,7 @@ typedef struct THRequestItem {
          }
          request->lltasks[request->lltask_count++] = lltask;
          task = lltask->task;
- 
+
          input.dims[height_idx] = task->in_frame->height;
          input.dims[width_idx] = task->in_frame->width;
          input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
@@ -562,7 +562,7 @@ typedef struct THRequestItem {
              ret = AVERROR(EINVAL);
              goto err;
          }
- 
+
          try {
              auto tensor = torch::from_blob(input.data,
                  {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
@@ -577,10 +577,10 @@ typedef struct THRequestItem {
              ret = AVERROR(EINVAL);
              goto err;
          }
- 
+
          av_freep(&input.data);
      }
- 
+
      // Stack tensors into batch
      try {
          if (!batch_tensors.empty()) {
@@ -596,7 +596,7 @@ typedef struct THRequestItem {
          goto err;
      }
      return 0;
- 
+
  err:
      if (input.data) {
          av_freep(&input.data);
@@ -604,7 +604,7 @@ typedef struct THRequestItem {
      th_free_request(infer_request);
      return ret;
  }
- 
+
  static int th_start_inference(void *args)
  {
      THRequestItem *request = (THRequestItem *)args;
@@ -615,7 +615,7 @@ typedef struct THRequestItem {
      DnnContext *ctx = NULL;
      std::vector<torch::jit::IValue> inputs;
      torch::NoGradGuard no_grad;
- 
+
      if (!request) {
          av_log(NULL, AV_LOG_ERROR, "THRequestItem is NULL\n");
          return AVERROR(EINVAL);
@@ -625,23 +625,23 @@ typedef struct THRequestItem {
      task = lltask->task;
      th_model = (THModel *)task->model;
      ctx = th_model->ctx;
- 
+
      if (ctx->torch_option.optimize)
          torch::jit::setGraphExecutorOptimize(true);
      else
          torch::jit::setGraphExecutorOptimize(false);
- 
+
      if (!infer_request->input_tensor || !infer_request->output) {
          av_log(ctx, AV_LOG_ERROR, "input or output tensor is NULL\n");
          return DNN_GENERIC_ERROR;
      }
      // Transfer tensor to the same device as model
      c10::Device device = (*th_model->jit_model->parameters().begin()).device();
-     
+
      if (infer_request->input_tensor->device() != device)
          *infer_request->input_tensor = infer_request->input_tensor->to(device);
      inputs.push_back(*infer_request->input_tensor);
- 
+
      #if (CONFIG_LIBTOKENIZERS == 1)
      if(th_model->model.func_type == DFT_ANALYTICS_CLIP){
          inputs.push_back(*th_model->clip_ctx->tokenized_text);
@@ -651,9 +651,9 @@ typedef struct THRequestItem {
          inputs.push_back(*th_model->clip_ctx->attention_mask);
      }
      #endif
- 
+
      auto result = th_model->jit_model->forward(inputs);
- 
+
      if(th_model->model.func_type == DFT_PROCESS_FRAME){
          *infer_request->output = result.toTensor();
      }
@@ -669,10 +669,10 @@ typedef struct THRequestItem {
          avpriv_report_missing_feature(ctx, "model function type %d", th_model->model.func_type);
          return AVERROR(EINVAL);
      }
- 
+
      return 0;
  }
- 
+
  static void infer_completion_callback(void *args) {
      THRequestItem *request = (THRequestItem*)args;
      LastLevelTaskItem *lltask = request->lltasks[0];
@@ -681,7 +681,7 @@ typedef struct THRequestItem {
      THInferRequest *infer_request = request->infer_request;
      THModel *th_model = (THModel *)task->model;
      torch::Tensor *output = infer_request->output;
- 
+
      c10::IntArrayRef sizes = output->sizes();
      outputs.order = DCO_RGB;
      outputs.layout = DL_NCHW;
@@ -708,28 +708,28 @@ typedef struct THRequestItem {
          avpriv_report_missing_feature(th_model->ctx, "Support of this kind of model");
          goto err;
      }
- 
+
      // Process each item in the batch
      for (int i = 0; i < request->lltask_count; i++) {
          LastLevelTaskItem *lltask = request->lltasks[i];
          TaskItem *task = lltask->task;
- 
+
          // Extract single item from batch
          torch::Tensor single_output;
          try {
              single_output = output->select(0, i);
-             
+
              // Move to CPU if needed
              if (single_output.device() != torch::kCPU) {
                  single_output = single_output.to(torch::kCPU);
              }
-             
+
              outputs.data = single_output.data_ptr();
          } catch (const c10::Error& e) {
              av_log(th_model->ctx, AV_LOG_ERROR, "Error processing output tensor: %s\n", e.what());
              goto err;
          }
- 
+
          switch (th_model->model.func_type) {
          case DFT_PROCESS_FRAME:
              if (task->do_ioproc) {
@@ -766,25 +766,25 @@ typedef struct THRequestItem {
  err:
      av_freep(&request->lltasks);
      request->lltask_count = 0;
- 
+
      if (ff_safe_queue_push_back(th_model->request_queue, request) < 0) {
          destroy_request_item(&request);
          av_log(th_model->ctx, AV_LOG_ERROR, "Unable to push back request_queue\n");
      }
  }
- 
+
  static int execute_model_th(THRequestItem *request, Queue *lltask_queue)
  {
      THModel *th_model = NULL;
      LastLevelTaskItem *lltask;
      TaskItem *task = NULL;
      int ret = 0;
- 
+
      if (ff_queue_size(lltask_queue) == 0) {
          destroy_request_item(&request);
          return 0;
      }
- 
+
      lltask = (LastLevelTaskItem *)ff_queue_peek_front(lltask_queue);
      if (lltask == NULL) {
          av_log(NULL, AV_LOG_ERROR, "Failed to get LastLevelTaskItem\n");
@@ -793,7 +793,7 @@ typedef struct THRequestItem {
      }
      task = lltask->task;
      th_model = (THModel *)task->model;
- 
+
      ret = fill_model_input_th(th_model, request);
      if ( ret != 0) {
          goto err;
@@ -808,7 +808,7 @@ typedef struct THRequestItem {
          infer_completion_callback(request);
          return (task->inference_done == task->inference_todo) ? 0 : DNN_GENERIC_ERROR;
      }
- 
+
  err:
      th_free_request(request->infer_request);
      if (ff_safe_queue_push_back(th_model->request_queue, request) < 0) {
@@ -816,7 +816,7 @@ typedef struct THRequestItem {
      }
      return ret;
  }
- 
+
  static int get_output_th(DNNModel *model, const char *input_name, int input_width, int input_height,
                                     const char *output_name, int *output_width, int *output_height)
  {
@@ -836,30 +836,30 @@ typedef struct THRequestItem {
      if ( ret != 0) {
          goto err;
      }
- 
+
      ret = extract_lltask_from_task(th_model->model.func_type, &task, th_model->lltask_queue, NULL);
      if ( ret != 0) {
          av_log(ctx, AV_LOG_ERROR, "unable to extract last level task from task.\n");
          goto err;
      }
- 
+
      request = (THRequestItem*) ff_safe_queue_pop_front(th_model->request_queue);
      if (!request) {
          av_log(ctx, AV_LOG_ERROR, "unable to get infer request.\n");
          ret = AVERROR(EINVAL);
          goto err;
      }
- 
+
      ret = execute_model_th(request, th_model->lltask_queue);
      *output_width = task.out_frame->width;
      *output_height = task.out_frame->height;
- 
+
  err:
      av_frame_free(&task.out_frame);
      av_frame_free(&task.in_frame);
      return ret;
  }
- 
+
  static THInferRequest *th_create_inference_request(void)
  {
      THInferRequest *request = (THInferRequest *)av_malloc(sizeof(THInferRequest));
@@ -870,19 +870,19 @@ typedef struct THRequestItem {
      request->output = NULL;
      return request;
  }
- 
+
  static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx){
      DNNModel *model = NULL;
      THModel *th_model = NULL;
      THRequestItem *item = NULL;
      const char *device_name = ctx->device ? ctx->device : "cpu";
- 
+
      th_model = (THModel *)av_mallocz(sizeof(THModel));
      if (!th_model)
          return NULL;
      model = &th_model->model;
      th_model->ctx = ctx;
- 
+
      c10::Device device = c10::Device(device_name);
      if (device.is_xpu()) {
          if (!at::hasXPU()) {
@@ -890,7 +890,7 @@ typedef struct THRequestItem {
              goto fail;
          }
          at::detail::getXPUHooks().init();
-     #if (CONFIG_LIBTORCH_CUDA == 1)
+     #if (HAVE_LIBTORCH_CUDA == 1)
      } else if (device.is_cuda()) {
          if (!torch::cuda::is_available()) {
              av_log(ctx, AV_LOG_ERROR, "CUDA is not available!\n");
@@ -909,14 +909,13 @@ typedef struct THRequestItem {
                  }
              }
              if (device_idx >= static_cast<int>(torch::cuda::device_count())) {
-                 av_log(ctx, AV_LOG_ERROR, "Requested CUDA device %d but only %ld devices available\n", 
+                 av_log(ctx, AV_LOG_ERROR, "Requested CUDA device %d but only %ld devices available\n",
                      device_idx, torch::cuda::device_count());
                  goto fail;
              }
              c10::cuda::set_device(device_idx);
-             c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());   
+             c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
              torch::cuda::synchronize();
-             
          } catch (const c10::Error& e) {
              av_log(ctx, AV_LOG_ERROR, "CUDA initialization failed: %s\n", e.what());
              goto fail;
@@ -926,7 +925,7 @@ typedef struct THRequestItem {
          av_log(ctx, AV_LOG_ERROR, "Not supported device:\"%s\"\n", device_name);
          goto fail;
      }
- 
+
      try {
          th_model->jit_model = new torch::jit::Module;
          (*th_model->jit_model) = torch::jit::load(ctx->model_filename);
@@ -935,12 +934,12 @@ typedef struct THRequestItem {
          av_log(ctx, AV_LOG_ERROR, "Failed to load torch model\n");
          goto fail;
      }
- 
+
      th_model->request_queue = ff_safe_queue_create();
      if (!th_model->request_queue) {
          goto fail;
      }
- 
+
      item = (THRequestItem *)av_mallocz(sizeof(THRequestItem));
      if (!item) {
          goto fail;
@@ -954,28 +953,28 @@ typedef struct THRequestItem {
      item->exec_module.start_inference = &th_start_inference;
      item->exec_module.callback = &infer_completion_callback;
      item->exec_module.args = item;
- 
+
      if (ff_safe_queue_push_back(th_model->request_queue, item) < 0) {
          goto fail;
      }
      item = NULL;
- 
+
      th_model->task_queue = ff_queue_create();
      if (!th_model->task_queue) {
          goto fail;
      }
- 
+
      th_model->lltask_queue = ff_queue_create();
      if (!th_model->lltask_queue) {
          goto fail;
      }
- 
+
      model->get_input = &get_input_th;
      model->get_output = &get_output_th;
      model->filter_ctx = filter_ctx;
      model->func_type = func_type;
      return th_model;
- 
+
  fail:
      if (item) {
          destroy_request_item(&item);
@@ -984,7 +983,7 @@ typedef struct THRequestItem {
      dnn_free_model_th(&model);
      return NULL;
  }
- 
+
  static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
  {
      THModel *th_model = init_model_th(ctx, func_type, filter_ctx);
@@ -993,7 +992,7 @@ typedef struct THRequestItem {
      }
      return &th_model->model;
  }
- 
+
  static DNNModel *dnn_load_model_with_tokenizer_th(DnnContext *ctx, DNNFunctionType func_type,  const char** labels, int label_count, const char* tokenizer_path, AVFilterContext *filter_ctx){
      THModel *th_model = init_model_th(ctx, func_type, filter_ctx);
      if (th_model == NULL) {
@@ -1007,8 +1006,8 @@ typedef struct THRequestItem {
      #endif
      return &th_model->model;
  }
- 
- 
+
+
  static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_params)
  {
      THModel *th_model = (THModel *)model;
@@ -1016,49 +1015,49 @@ typedef struct THRequestItem {
      TaskItem *task;
      THRequestItem *request;
      int ret = 0;
- 
+
      ret = ff_check_exec_params(ctx, DNN_TH, model->func_type, exec_params);
      if (ret != 0) {
          av_log(ctx, AV_LOG_ERROR, "exec parameter checking fail.\n");
          return ret;
      }
- 
+
      task = (TaskItem *)av_malloc(sizeof(TaskItem));
      if (!task) {
          av_log(ctx, AV_LOG_ERROR, "unable to alloc memory for task item.\n");
          return AVERROR(ENOMEM);
      }
- 
+
      ret = ff_dnn_fill_task(task, exec_params, th_model, 0, 1);
      if (ret != 0) {
          av_freep(&task);
          av_log(ctx, AV_LOG_ERROR, "unable to fill task.\n");
          return ret;
      }
- 
+
      ret = ff_queue_push_back(th_model->task_queue, task);
      if (ret < 0) {
          av_freep(&task);
          av_log(ctx, AV_LOG_ERROR, "unable to push back task_queue.\n");
          return ret;
      }
- 
+
      ret = extract_lltask_from_task(model->func_type, task, th_model->lltask_queue, exec_params);
      if (ret != 0) {
          av_log(ctx, AV_LOG_ERROR, "unable to extract last level task from task.\n");
          return ret;
      }
- 
+
      if(task->inference_todo == 0){
          return 0;
-     } 
-     
+     }
+
      request = (THRequestItem *)ff_safe_queue_pop_front(th_model->request_queue);
      if (!request) {
          av_log(ctx, AV_LOG_ERROR, "unable to get infer request.\n");
          return AVERROR(EINVAL);
      }
- 
+
      request->lltasks = (LastLevelTaskItem **)av_malloc_array(task->inference_todo, sizeof(*request->lltasks));
      if (!request->lltasks) {
          av_log(ctx, AV_LOG_ERROR, "unable to create lltasks.\n");
@@ -1067,31 +1066,31 @@ typedef struct THRequestItem {
      request->lltask_count = 0;
      return execute_model_th(request, th_model->lltask_queue);
  }
- 
+
  static DNNAsyncStatusType dnn_get_result_th(const DNNModel *model, AVFrame **in, AVFrame **out)
  {
      THModel *th_model = (THModel *)model;
      return ff_dnn_get_result_common(th_model->task_queue, in, out);
  }
- 
+
  static int dnn_flush_th(const DNNModel *model)
  {
      THModel *th_model = (THModel *)model;
      THRequestItem *request;
- 
+
      if (ff_queue_size(th_model->lltask_queue) == 0)
          // no pending task need to flush
          return 0;
- 
+
      request = (THRequestItem *)ff_safe_queue_pop_front(th_model->request_queue);
      if (!request) {
          av_log(th_model->ctx, AV_LOG_ERROR, "unable to get infer request.\n");
          return AVERROR(EINVAL);
      }
- 
+
      return execute_model_th(request, th_model->lltask_queue);
  }
- 
+
  extern const DNNModule ff_dnn_backend_torch = {
      .clazz          = DNN_DEFINE_CLASS(dnn_th),
      .type           = DNN_TH,
