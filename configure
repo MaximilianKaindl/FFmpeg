@@ -1968,7 +1968,6 @@ EXTERNAL_LIBRARY_LIST="
     libtesseract
     libtheora
     libtorch
-    libtorch_cuda
     libtokenizers
     libtwolame
     libuavs3d
@@ -7047,7 +7046,7 @@ enabled libtensorflow     && require libtensorflow tensorflow/c/c_api.h TF_Versi
 enabled libtesseract      && require_pkg_config libtesseract tesseract tesseract/capi.h TessBaseAPICreate
 enabled libtheora         && require libtheora theora/theoraenc.h th_info_init -ltheoraenc -ltheoradec -logg
 enabled libtls            && require_pkg_config libtls libtls tls.h tls_configure
-enabled libtorch          && check_cxxflags -std=c++17 && require_cpp libtorch torch/torch.h "torch::Tensor" -ltorch -lc10 -ltorch_cpu -lstdc++ -lpthread && { check_lib_cpp libtorch_cuda torch/cuda.h -lc10_cuda -ltorch_cuda && enable libtorch_cuda; }
+enabled libtorch          && check_cxxflags -std=c++17 && require_cpp libtorch torch/torch.h "torch::Tensor" -ltorch -lc10 -ltorch_cpu -lstdc++ -lpthread && { check_lib_cpp libtorch torch/cuda.h "" "-lc10_cuda -ltorch_cuda" && enable libtorch_cuda; }
 enabled libtokenizers     && check_cxxflags -std=c++17 && require_cpp libtokenizers "tokenizers_cpp.h tokenizers_c.h" "" -ltokenizers_cpp -ltokenizers_c -lstdc++
 enabled libtwolame        && require libtwolame twolame.h twolame_init -ltwolame &&
                              { check_lib libtwolame twolame.h twolame_encode_buffer_float32_interleaved -ltwolame ||
