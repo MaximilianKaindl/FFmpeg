@@ -33,10 +33,10 @@ typedef struct LabelContext {
 } LabelContext;
 
 /*
-   Header (Attribute) that is being described by all its labels. 
+   Header (Attribute) that is being described by all its labels.
    (name) in labels file
 
-   e.g. 
+   e.g.
    (Comic)
    a drawn image
    a fictional character
@@ -53,13 +53,13 @@ typedef struct CategoryContext {
 } CategoryContext;
 
 /*
-   Single unit that is being classified 
+   Single unit that is being classified
    [name] in categories file
 
    e.g.
    [RecordingSystem]
    (Professional)
-   a photo with high level of detail 
+   a photo with high level of detail
    ...
    (HomeRecording)
    a photo with low level of detail
@@ -90,5 +90,6 @@ void free_category_classfication_context(CategoryClassifcationContext *category_
 int read_label_file(AVFilterContext *context, LabelContext *label_classification_ctx, char* labels_filename, int max_line_length);
 int read_categories_file(AVFilterContext *context, CategoryClassifcationContext *cat_class_ctx, char* categories_filename, int max_line_length);
 int combine_all_category_labels(LabelContext **label_ctx, CategoryClassifcationContext *cat_class_ctx);
-
+int get_category_label_counts(CategoryClassifcationContext *cat_ctx, int **label_counts);
+CategoryContext *get_best_category(CategoriesContext *categories_ctx, float *probabilities);
 #endif
