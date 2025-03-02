@@ -424,57 +424,123 @@ typedef struct THRequestItem {
     try {
         return torch::matmul(image_features, text_embedding.transpose(0, 1));
     } catch (const c10::Error &e) {
-        av_log(ctx, AV_LOG_ERROR, "Similarity computation failed: %s\n", e.what());
-        return {};
+static torch::Tensor handle_short_audio_tensor(torch::Tensor audio_tensor,
+                                               int target_samples)
+{
+    int nb_samples = audio_tensor.size(0);
+    int repeat_factor = (target_samples + nb_samples - 1) / nb_samples;
+
+    // Repeat tensor along dimension 0 to fill required length
+    torch::Tensor repeated = audio_tensor.repeat({repeat_factor});
+
+    // Take only the needed samples
+    return repeated.slice(0, 0, target_samples);
+}
+
+static torch::Tensor handle_long_audio_tensor(torch::Tensor audio_tensor,
+                                              int target_samples,
+                                              TaskItem *task)
+{
+    int nb_samples = audio_tensor.size(0);
+    int max_start = nb_samples - target_samples;
+
+    // Use a deterministic seed based on frame properties
+    unsigned int seed =
+        (unsigned int)((uintptr_t)task ^
+                       (uintptr_t)(task->in_frame->pts ? task->in_frame->pts
+                                                       : nb_samples));
+
+    // Determine start position - center-biased for better representation
+    int start_idx;
+
+    // Prefer center segments for better representation, with some randomness
+    if (seed % 3 == 0) { // ~33% chance for center segment
+        start_idx = (nb_samples - target_samples) / 2;
+    } else {
+        // Otherwise use seeded position
+        start_idx = seed % (max_start + 1);
     }
+
+    // Extract the segment using slice operation
+    return audio_tensor.slice(0, start_idx, start_idx + target_samples);
 }
 
  static int prepare_audio_tensor(const THModel *th_model,
-                               const THRequestItem *request) {
+                                const THRequestItem *request)
+{
      THInferRequest *infer_request = request->infer_request;
      LastLevelTaskItem *lltask = request->lltasks[0];
      TaskItem *task = lltask->task;
      DnnContext *ctx = th_model->ctx;
-     float *audio_data = NULL;
-     int nb_samples = 0;
+    int ret = 0;
 
-     int target_samples = CLAP_SAMPLE_RATE * CLAP_SAMPLE_DURATION_SECONDS;
+    // Get target duration in samples (7 seconds at 44100Hz = 308700 samples)
+    const int target_samples = CLAP_SAMPLE_RATE * CLAP_SAMPLE_DURATION_SECONDS;
 
-     audio_data = (float *)task->in_frame->data[0];
-     nb_samples = task->in_frame->nb_samples;
+    // Validate input frame
+    if (!task->in_frame || !task->in_frame->data[0]) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid input frame or data\n");
+        return AVERROR(EINVAL);
+    }
 
-     // Calculate batch size dynamically based on available samples
-     int batch_size = nb_samples / target_samples;
+    // Get audio data from the frame
+    float *audio_data = (float *)task->in_frame->data[0];
+    int nb_samples = task->in_frame->nb_samples;
 
-     // Check if we have enough samples for at least one batch
-     if (batch_size < 1) {
+    av_log(ctx, AV_LOG_INFO, "Audio input: %d samples at %d Hz\n", nb_samples,
+           task->in_frame->sample_rate);
+
+    // Validate audio parameters
+    if (task->in_frame->sample_rate != CLAP_SAMPLE_RATE) {
          av_log(ctx, AV_LOG_ERROR,
-             "Not enough samples for processing. Have %d, need at least %d\n",
-             nb_samples, target_samples);
+               "Sample rate mismatch. Expected %d Hz, got %d Hz\n",
+               CLAP_SAMPLE_RATE, task->in_frame->sample_rate);
          return AVERROR(EINVAL);
      }
 
-     av_log(ctx, AV_LOG_INFO, "Dynamically calculated batch size: %d\n",
-             batch_size);
-
-     // Check if frame already has the target sample rate
-     if (task->in_frame->sample_rate == CLAP_SAMPLE_RATE &&
-         task->in_frame->format == AV_SAMPLE_FMT_FLT) {
-         // No resampling needed
+    if (task->in_frame->format != AV_SAMPLE_FMT_FLT) {
+        av_log(ctx, AV_LOG_ERROR,
+               "Unsupported sample format. Expected float\n");
+        return AVERROR(EINVAL);
      }
 
      try {
-         // Create input tensor with batch dimension {batch_size, target_samples}
-         *infer_request->input_tensor =
-             torch::from_blob(audio_data, {batch_size, target_samples},
-                             torch::kFloat32)
-                 .clone();
+        torch::Tensor audio_tensor =
+            torch::from_blob(audio_data, {nb_samples}, torch::kFloat32).clone();
+
+        c10::Device device =
+            (*th_model->jit_model->parameters().begin()).device();
+        if (audio_tensor.device() != device) {
+            audio_tensor = audio_tensor.to(device);
+        }
+
+        // Create target tensor based on the audio length
+        torch::Tensor processed_tensor;
+
+        if (nb_samples < target_samples) {
+            // Handle short audio using tensor repeat operation
+            processed_tensor =
+                handle_short_audio_tensor(audio_tensor, target_samples);
+        } else if (nb_samples > target_samples) {
+            // Handle long audio using tensor slice operation
+            processed_tensor =
+                handle_long_audio_tensor(audio_tensor, target_samples, task);
+        } else {
+            // Exact length, just use the tensor as is
+            processed_tensor = audio_tensor;
+        }
+
+        processed_tensor = processed_tensor.reshape({1, -1});
+
+        // Assign to output
+        *infer_request->input_tensor = processed_tensor;
      } catch (const c10::Error &e) {
-         av_log(ctx, AV_LOG_ERROR, "Audio encoding error: %s\n", e.what());
+        av_log(ctx, AV_LOG_ERROR, "Audio tensor processing failed: %s\n",
+               e.what());
          return AVERROR(EINVAL);
      }
 
-     return 0;
+    return ret;
  }
 
  static int preprocess_image_tensor(const THModel *th_model,
