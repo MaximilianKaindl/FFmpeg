@@ -98,6 +98,8 @@ typedef struct DNNExecZeroShotClassificationParams {
     const int label_count;
     const char *target;
     const char *tokenizer_path;
+    const int *softmax_units;
+    const int softmax_units_count;
 } DNNExecZeroShotClassificationParams;
 
 typedef int (*FramePrePostProc)(AVFrame *frame, DNNData *model, AVFilterContext *filter_ctx);
@@ -146,6 +148,12 @@ typedef struct OVOptions {
 typedef struct THOptions {
     const AVClass *clazz;
     int optimize;
+
+    // Contrastive Language-X Pre-training options
+    float logit_scale;
+    float temperature;
+    int forward_order;  // Order of forward output (0: media text, 1: text media)
+    int normalize;      // Normalize the input tensor
 } THOptions;
 
 typedef struct DNNModule DNNModule;
@@ -188,7 +196,7 @@ struct DNNModule {
     // Loads model and parameters from given file. Returns NULL if it is not possible.
     DNNModel *(*load_model)(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx);
 
-    DNNModel *(*load_model_with_tokenizer)(DnnContext *ctx, DNNFunctionType func_type, const char** labels, int label_count, const char* tokenizer_path, AVFilterContext *filter_ctx);
+    DNNModel *(*load_model_with_tokenizer)(DnnContext *ctx, DNNFunctionType func_type, const char** labels, int label_count, int* softmax_units, int softmax_units_count, const char* tokenizer_path, AVFilterContext *filter_ctx);
 
     // Executes model with specified input and output. Returns the error code otherwise.
     int (*execute_model)(const DNNModel *model, DNNExecBaseParams *exec_params);
