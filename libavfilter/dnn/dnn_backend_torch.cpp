@@ -417,13 +417,85 @@ typedef struct THRequestItem {
  }
  #endif
 
-
- static torch::Tensor calculate_similarity(const torch::Tensor &image_features,
-    const torch::Tensor &text_embedding,
-    DnnContext *ctx) {
+static torch::Tensor calculate_similarity(torch::Tensor &tensor1,
+                                          torch::Tensor &tensor2,
+                                          bool normalize, float logit_scale,
+                                          DnnContext *ctx)
+{
     try {
-        return torch::matmul(image_features, text_embedding.transpose(0, 1));
+        // Make copies to avoid modifying the original tensors
+        torch::Tensor t1 = tensor1.clone();
+        torch::Tensor t2 = tensor2.clone();
+
+        if (normalize) {
+            t1 = torch::nn::functional::normalize(
+                t1, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
+
+            t2 = torch::nn::functional::normalize(
+                t2, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
+        }
+
+        // Compute similarity matrix
+        torch::Tensor similarity =
+            logit_scale * torch::matmul(t2, t1.transpose(0, 1));
+        return similarity.transpose(0, 1);
     } catch (const c10::Error &e) {
+        if (ctx) {
+            av_log(ctx, AV_LOG_ERROR, "Similarity computation failed: %s\n",
+                   e.what());
+        }
+        return torch::Tensor(); // Return empty tensor properly
+    }
+}
+
+static torch::Tensor apply_softmax(torch::Tensor input_tensor,
+                                   const int *softmax_units,
+                                   int softmax_units_count, DnnContext *ctx)
+{
+    try {
+        // Check for empty or invalid input tensor
+        if (input_tensor.numel() == 0 || input_tensor.dim() < 2) {
+            av_log(ctx, AV_LOG_ERROR, "Invalid input tensor for softmax\n");
+            return input_tensor;
+        }
+
+        // If no specific units are provided, apply softmax to the entire tensor
+        if (!softmax_units || softmax_units_count <= 0) {
+            return torch::nn::functional::softmax(
+                input_tensor, torch::nn::functional::SoftmaxFuncOptions(1));
+        }
+
+        torch::Tensor result = input_tensor.clone();
+        int offset = 0;
+
+        // Apply softmax to each specified segment
+        for (int i = 0; i < softmax_units_count; i++) {
+            int length = softmax_units[i];
+            if (length <= 0 || offset + length > input_tensor.size(1)) {
+                continue;
+            }
+
+            // Select the segment to apply softmax
+            torch::Tensor segment = result.slice(1, offset, offset + length);
+
+            // Apply softmax along dimension 1 (across labels in segment)
+            torch::Tensor softmax_segment = torch::nn::functional::softmax(
+                segment, torch::nn::functional::SoftmaxFuncOptions(1));
+
+            // Put softmaxed segment back into result tensor
+            result.slice(1, offset, offset + length) = softmax_segment;
+
+            // Move offset forward
+            offset += length;
+        }
+        return result;
+    } catch (const c10::Error &e) {
+        if (ctx) {
+            av_log(ctx, AV_LOG_ERROR, "Error applying softmax: %s\n", e.what());
+        }
+        return input_tensor; // Return original tensor on error
+    }
+}
 static torch::Tensor handle_short_audio_tensor(torch::Tensor audio_tensor,
                                                int target_samples)
 {
