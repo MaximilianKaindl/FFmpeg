@@ -84,7 +84,7 @@ int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext
         if (ctx->model_outputnames)
             av_log(filter_ctx, AV_LOG_WARNING, "LibTorch backend do not require outputname(s), "\
                                                "all outputname(s) will be ignored.\n");
-                                               
+
         #if (CONFIG_LIBTOKENIZERS == 0)
         if((func_type == DFT_ANALYTICS_CLIP || func_type == DFT_ANALYTICS_CLAP)){
             av_log(ctx, AV_LOG_ERROR, "tokenizers-cpp is not included. CLIP/CLAP Classification requires tokenizers-cpp library. Include it with configure.\n");
@@ -149,12 +149,12 @@ int ff_dnn_init(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *fil
     return 0;
 }
 
-int ff_dnn_init_with_tokenizer(DnnContext *ctx, DNNFunctionType func_type, char** labels, int label_count, char* tokenizer_path, AVFilterContext *filter_ctx){
+int ff_dnn_init_with_tokenizer(DnnContext *ctx, DNNFunctionType func_type, char** labels, int label_count, int* softmax_units, int softmax_units_count, char* tokenizer_path, AVFilterContext *filter_ctx){
     int ret = ff_dnn_init_priv(ctx, func_type, filter_ctx);
     if (ret < 0) {
         return ret;
     }
-    ctx->model = (ctx->dnn_module->load_model_with_tokenizer)(ctx, func_type, labels, label_count, tokenizer_path, filter_ctx);
+    ctx->model = (ctx->dnn_module->load_model_with_tokenizer)(ctx, func_type, labels, label_count, softmax_units, softmax_units_count, tokenizer_path, filter_ctx);
     if (!ctx->model) {
         av_log(filter_ctx, AV_LOG_ERROR, "could not load DNN model\n");
         return AVERROR(EINVAL);
@@ -221,7 +221,7 @@ int ff_dnn_execute_model_classification(DnnContext *ctx, AVFrame *in_frame, AVFr
     return (ctx->dnn_module->execute_model)(ctx->model, &class_params.base);
 }
 
-int ff_dnn_execute_model_clxp(DnnContext *ctx, AVFrame *in_frame, AVFrame *out_frame, const char **labels, int label_count, const char* tokenizer_path, char *target)
+int ff_dnn_execute_model_clip(DnnContext *ctx, AVFrame *in_frame, AVFrame *out_frame, const char **labels, int label_count, const char* tokenizer_path, char *target)
 {
     DNNExecZeroShotClassificationParams class_params = {
         {
@@ -235,6 +235,23 @@ int ff_dnn_execute_model_clxp(DnnContext *ctx, AVFrame *in_frame, AVFrame *out_f
         .label_count = label_count,
         .tokenizer_path = tokenizer_path,
         .target = target,
+    };
+    return (ctx->dnn_module->execute_model)(ctx->model, &class_params.base);
+}
+
+int ff_dnn_execute_model_clap(DnnContext *ctx, AVFrame *in_frame, AVFrame *out_frame, const char **labels, int label_count, const char* tokenizer_path)
+{
+    DNNExecZeroShotClassificationParams class_params = {
+        {
+            .input_name     = ctx->model_inputname,
+            .output_names   = (const char **)ctx->model_outputnames,
+            .nb_output      = ctx->nb_outputs,
+            .in_frame       = in_frame,
+            .out_frame      = out_frame,
+        },
+        .labels = labels,
+        .label_count = label_count,
+        .tokenizer_path = tokenizer_path,
     };
     return (ctx->dnn_module->execute_model)(ctx->model, &class_params.base);
 }
