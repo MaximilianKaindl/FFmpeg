@@ -1009,7 +1009,9 @@ static torch::Tensor handle_long_audio_tensor(torch::Tensor audio_tensor,
      return request;
  }
 
- static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx){
+static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type,
+                              AVFilterContext *filter_ctx)
+{
      DNNModel *model = NULL;
      THModel *th_model = NULL;
      THRequestItem *item = NULL;
@@ -1020,6 +1022,33 @@ static torch::Tensor handle_long_audio_tensor(torch::Tensor audio_tensor,
          return NULL;
      model = &th_model->model;
      th_model->ctx = ctx;
+
+    if(ctx->torch_option.forward_order < 0){
+        //set default value for forward_order
+        ctx->torch_option.forward_order = func_type == DFT_ANALYTICS_CLAP ? 1 : 0;
+        // Log the default value for forward_order
+        av_log(ctx, AV_LOG_INFO,
+            "Using default forward_order=%d for %s input\n",
+            ctx->torch_option.forward_order,
+            func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
+    }
+    if(ctx->torch_option.logit_scale <= 0){
+        //set default value for logit_scale
+        ctx->torch_option.logit_scale = func_type == DFT_ANALYTICS_CLAP ? 33.37 : 4.6052;
+        // Log the default value for logit_scale
+        av_log(ctx, AV_LOG_INFO,
+            "Using default logit_scale=%.4f for %s input\n",
+            ctx->torch_option.logit_scale,
+            func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
+    }
+    if(ctx->torch_option.normalize < 0){
+        ctx->torch_option.normalize = func_type == DFT_ANALYTICS_CLAP ? 1 : 0;
+        // Log the default value for logit_scale
+        av_log(ctx, AV_LOG_INFO,
+            "Using default normalize=%d for %s input\n",
+            ctx->torch_option.normalize,
+            func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
+    }
 
      c10::Device device = c10::Device(device_name);
      if (device.is_xpu()) {
@@ -1037,25 +1066,30 @@ static torch::Tensor handle_long_audio_tensor(torch::Tensor audio_tensor,
          // Initialize CUDA
          try {
              int device_idx = 0;
-             const char* device_num = strstr(device_name, ":");
+            const char *device_num = strstr(device_name, ":");
              if (device_num) {
-                 char* endptr = NULL;
+                char *endptr = NULL;
                  device_idx = strtol(device_num + 1, &endptr, 10);
                  if (*endptr != '\0' && !isspace(*endptr)) {
-                     av_log(ctx, AV_LOG_ERROR, "Invalid device number format: %s\n", device_num + 1);
+                    av_log(ctx, AV_LOG_ERROR,
+                           "Invalid device number format: %s\n",
+                           device_num + 1);
                      goto fail;
                  }
              }
              if (device_idx >= static_cast<int>(torch::cuda::device_count())) {
-                 av_log(ctx, AV_LOG_ERROR, "Requested CUDA device %d but only %ld devices available\n",
+                av_log(
+                    ctx, AV_LOG_ERROR,
+                    "Requested CUDA device %d but only %ld devices available\n",
                      device_idx, torch::cuda::device_count());
                  goto fail;
              }
              c10::cuda::set_device(device_idx);
              c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
              torch::cuda::synchronize();
-         } catch (const c10::Error& e) {
-             av_log(ctx, AV_LOG_ERROR, "CUDA initialization failed: %s\n", e.what());
+        } catch (const c10::Error &e) {
+            av_log(ctx, AV_LOG_ERROR, "CUDA initialization failed: %s\n",
+                   e.what());
              goto fail;
          }
      #endif
@@ -1068,7 +1102,7 @@ static torch::Tensor handle_long_audio_tensor(torch::Tensor audio_tensor,
          th_model->jit_model = new torch::jit::Module;
          (*th_model->jit_model) = torch::jit::load(ctx->model_filename);
          th_model->jit_model->to(device);
-     } catch (const c10::Error& e) {
+    } catch (const c10::Error &e) {
          av_log(ctx, AV_LOG_ERROR, "Failed to load torch model\n");
          goto fail;
      }
@@ -1085,7 +1119,8 @@ static torch::Tensor handle_long_audio_tensor(torch::Tensor audio_tensor,
      item->lltasks = NULL;
      item->infer_request = th_create_inference_request();
      if (!item->infer_request) {
-         av_log(NULL, AV_LOG_ERROR, "Failed to allocate memory for Torch inference request\n");
+        av_log(NULL, AV_LOG_ERROR,
+               "Failed to allocate memory for Torch inference request\n");
          goto fail;
      }
      item->exec_module.start_inference = &th_start_inference;
