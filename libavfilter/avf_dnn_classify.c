@@ -37,9 +37,6 @@
 #include "video.h"
 
 #define TYPE_ALL 2  // Number of media types (video and audio)
-#define CLAP_SAMPLE_RATE 44100
-#define CLAP_SAMPLE_DURATION_SECONDS 7
-#define CLAP_MIN_SAMPLES_PER_FRAME (CLAP_SAMPLE_RATE * CLAP_SAMPLE_DURATION_SECONDS)
 
 typedef struct DnnClassifyContext {
     const AVClass *class;
@@ -59,8 +56,6 @@ typedef struct DnnClassifyContext {
 
     // Audio-specific parameters
     int is_audio;               // New flag to indicate if input will be audio
-    int sample_rate;            // Only relevant for audio streams
-    int64_t samples_per_frame;  // Minimum samples needed for CLAP
 } DnnClassifyContext;
 
 #define OFFSET(x) offsetof(DnnClassifyContext, dnnctx.x)
@@ -89,7 +84,13 @@ typedef struct DnnClassifyContext {
             {"forward_order", "Order of forward output (0: media text, 1: text media) (CLIP/CLAP only)", OFFSET3(forward_order),
                     AV_OPT_TYPE_BOOL, {.i64 = -1}, -1, 1, FLAGS},
             {"normalize", "Normalize the input tensor (CLIP/CLAP only)", OFFSET3(normalize),
-                    AV_OPT_TYPE_BOOL, {.i64 = -1}, 0, 1, FLAGS},
+                    AV_OPT_TYPE_BOOL, {.i64 = -1}, -1, 1, FLAGS},
+            {"sample_rate_clap", "audio processing model expected sample rate", OFFSET3(sample_rate),
+                AV_OPT_TYPE_INT64, {.i64 = 44100}, 1600, 192000, FLAGS},
+            {"sample_duration", "audio processing model expected sample duration", OFFSET3(sample_duration),
+                AV_OPT_TYPE_INT64, {.i64 = 7}, 1, 100, FLAGS},
+            {"token_dimension", "dimension of token vector", OFFSET3(token_dimension),
+                AV_OPT_TYPE_INT64, {.i64 = 77}, 1, 10000, FLAGS},
         #endif
             {"confidence", "threshold of confidence", OFFSET2(confidence),
              AV_OPT_TYPE_FLOAT, {.dbl = 0.5}, 0, 1, FLAGS},
@@ -209,7 +210,6 @@ static int post_proc_standard(AVFrame *frame, DNNData *output,
     return 0;
 }
 
-// Processing functions for CLIP/CLAP (both media types)
 static int post_proc_clxp_labels(AVFrame *frame, DNNData *output,
                                  uint32_t bbox_index,
                                  AVFilterContext *filter_ctx)
@@ -396,6 +396,8 @@ static int config_input(AVFilterLink *inlink)
     outlink->sample_aspect_ratio = inlink->sample_aspect_ratio;
     outlink->time_base = inlink->time_base;
 
+    int64_t sample_rate = ctx->dnnctx.torch_option.sample_rate;
+
     // Validate media type
     if (ctx->type != AVMEDIA_TYPE_AUDIO && ctx->type != AVMEDIA_TYPE_VIDEO) {
         av_log(context, AV_LOG_ERROR,
@@ -406,8 +408,6 @@ static int config_input(AVFilterLink *inlink)
     // Set type-specific parameters and check compatibility
     if (ctx->type == AVMEDIA_TYPE_AUDIO) {
         // Audio-specific settings
-        ctx->sample_rate = CLAP_SAMPLE_RATE;
-        ctx->samples_per_frame = CLAP_MIN_SAMPLES_PER_FRAME;
         goal_mode = DFT_ANALYTICS_CLAP;
 
         // Check backend compatibility
@@ -418,7 +418,7 @@ static int config_input(AVFilterLink *inlink)
         }
 
         // Check sample rate
-        if (inlink->sample_rate != CLAP_SAMPLE_RATE) {
+        if (inlink->sample_rate != sample_rate) {
             av_log(context, AV_LOG_ERROR,
                    "Invalid sample rate. CLAP requires 44100 Hz\n");
             return AVERROR(EINVAL);
@@ -602,6 +602,8 @@ static av_cold int dnn_classify_init(AVFilterContext *context)
 
 static int query_formats(AVFilterContext *ctx)
 {
+    DnnClassifyContext *classify_ctx = ctx->priv;
+
     int ret;
     // Get the type from the first input pad
     enum AVMediaType type = ctx->inputs[0]->type;
@@ -623,12 +625,12 @@ static int query_formats(AVFilterContext *ctx)
         ret = ff_set_common_formats(ctx, ff_make_format_list(sample_fmts));
         if (ret < 0)
             return ret;
-
+        #if (CONFIG_LIBTORCH == 1)
         ret = ff_set_common_samplerates(
-            ctx, ff_make_format_list((const int[]){CLAP_SAMPLE_RATE, -1}));
+            ctx, ff_make_format_list((const int[]){classify_ctx->dnnctx.torch_option.sample_rate, -1}));
         if (ret < 0)
             return ret;
-
+        #endif
         ret = ff_set_common_channel_layouts(ctx, ff_all_channel_layouts());
         if (ret < 0)
             return ret;
@@ -697,11 +699,13 @@ static int process_audio_frame(AVFilterContext *context, AVFrame *frame)
     DnnClassifyContext *ctx = context->priv;
     int ret;
 
-    if (frame->nb_samples < CLAP_MIN_SAMPLES_PER_FRAME) {
+    int64_t samples_per_frame = ctx->dnnctx.torch_option.sample_rate * ctx->dnnctx.torch_option.sample_duration;
+
+    if (frame->nb_samples < samples_per_frame) {
         av_log(context, AV_LOG_WARNING,
                "Audio frame too short for CLAP analysis (needs %d samples, got "
                "%d)\n",
-               CLAP_MIN_SAMPLES_PER_FRAME, frame->nb_samples);
+               samples_per_frame, frame->nb_samples);
     }
 
     ret = ff_dnn_execute_model_clap(

@@ -154,6 +154,10 @@ typedef struct THOptions {
     float temperature;
     int forward_order;  // Order of forward output (0: media text, 1: text media)
     int normalize;      // Normalize the input tensor
+
+    int64_t token_dimension;
+    int64_t sample_rate;
+    int64_t sample_duration;
 } THOptions;
 
 typedef struct DNNModule DNNModule;

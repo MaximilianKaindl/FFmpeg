@@ -23,11 +23,6 @@
  * DNN Torch backend implementation.
  */
 
-// Constants for CLIP and CLAP models
-#define CLXP_EMBEDDING_DIMS 77
-#define CLAP_SAMPLE_RATE 44100
-#define CLAP_SAMPLE_DURATION_SECONDS 7
-
 extern "C" {
 #include "dnn_io_proc.h"
 #include "dnn_backend_common.h"
@@ -51,13 +46,13 @@ extern "C" {
 #include <ATen/cuda/CUDAContext.h>
 #endif
 
-typedef struct THClipContext {
+typedef struct THClxpContext {
     torch::Tensor *tokenized_text;
     torch::Tensor *attention_mask;
     int64_t resolution;
     int *softmax_units;
     int softmax_units_count;
-} THClipContext;
+} THClxpContext;
 
 typedef struct THModel {
     DNNModel model;
@@ -67,7 +62,7 @@ typedef struct THModel {
     Queue *task_queue;
     Queue *lltask_queue;
 
-    THClipContext *clip_ctx;
+    THClxpContext *clxp_ctx;
 
 } THModel;
 
@@ -215,19 +210,19 @@ static inline void destroy_request_item(THRequestItem **arg)
     av_freep(arg);
 }
 
-static void free_clip_context(THClipContext *clip_ctx)
+static void free_clip_context(THClxpContext *clxp_ctx)
 {
-    if (!clip_ctx)
+    if (!clxp_ctx)
         return;
-    if (clip_ctx->tokenized_text) {
-        delete clip_ctx->tokenized_text;
-        clip_ctx->tokenized_text = nullptr;
+    if (clxp_ctx->tokenized_text) {
+        delete clxp_ctx->tokenized_text;
+        clxp_ctx->tokenized_text = nullptr;
     }
-    if (clip_ctx->attention_mask) {
-        delete clip_ctx->attention_mask;
-        clip_ctx->attention_mask = nullptr;
+    if (clxp_ctx->attention_mask) {
+        delete clxp_ctx->attention_mask;
+        clxp_ctx->attention_mask = nullptr;
     }
-    av_freep(&clip_ctx);
+    av_freep(&clxp_ctx);
 }
 
 static void dnn_free_model_th(DNNModel **model)
@@ -260,7 +255,7 @@ static void dnn_free_model_th(DNNModel **model)
     ff_queue_destroy(th_model->task_queue);
     delete th_model->jit_model;
 #if (CONFIG_LIBTOKENIZERS == 1)
-    free_clip_context(th_model->clip_ctx);
+    free_clip_context(th_model->clxp_ctx);
 #endif
     av_freep(&th_model);
     *model = NULL;
@@ -283,7 +278,7 @@ static void deleter(void *arg)
     av_freep(&arg);
 }
 
-static int get_clip_input_res(THModel *th_model, const c10::Device &device)
+static int test_clip_input_res(THModel *th_model, const c10::Device &device)
 {
     // Common CLIP input dimensions to test
     std::vector<int64_t> test_dims[] = {
@@ -321,7 +316,7 @@ static int get_clip_input_res(THModel *th_model, const c10::Device &device)
 
 #if (CONFIG_LIBTOKENIZERS == 1)
 
-static int get_tokenized_batch(THClipContext *clip_ctx, const char **labels,
+static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
                                int label_count, const char *tokenizer_path,
                                DnnContext *ctx, const c10::Device &device)
 {
@@ -350,15 +345,16 @@ static int get_tokenized_batch(THClipContext *clip_ctx, const char **labels,
     // Create tensors for tokens and attention mask
     std::vector<torch::Tensor> tokens_tensors;
     std::vector<torch::Tensor> attention_tensors;
+    int64_t token_dimension = ctx->torch_option.token_dimension;
 
     for (int i = 0; i < label_count; i++) {
         std::vector<int64_t> current_tokens;
         std::vector<int64_t> current_attention;
 
-        current_tokens.reserve(CLXP_EMBEDDING_DIMS);
-        current_attention.reserve(CLXP_EMBEDDING_DIMS);
+        current_tokens.reserve(token_dimension);
+        current_attention.reserve(token_dimension);
 
-        for (int j = 0; j < CLXP_EMBEDDING_DIMS; j++) {
+        for (int j = 0; j < token_dimension; j++) {
             if (j < token_counts[i]) {
                 current_tokens.push_back(
                     static_cast<int64_t>(tokens_array[i][j]));
@@ -376,16 +372,16 @@ static int get_tokenized_batch(THClipContext *clip_ctx, const char **labels,
     }
 
     // Stack all tensors into batches
-    clip_ctx->tokenized_text = new torch::Tensor(torch::stack(tokens_tensors));
-    clip_ctx->attention_mask =
+    clxp_ctx->tokenized_text = new torch::Tensor(torch::stack(tokens_tensors));
+    clxp_ctx->attention_mask =
         new torch::Tensor(torch::stack(attention_tensors));
 
     // Move tensors to the appropriate device
-    if (clip_ctx->tokenized_text->device() != device) {
-        *clip_ctx->tokenized_text = clip_ctx->tokenized_text->to(device);
+    if (clxp_ctx->tokenized_text->device() != device) {
+        *clxp_ctx->tokenized_text = clxp_ctx->tokenized_text->to(device);
     }
-    if (clip_ctx->attention_mask->device() != device) {
-        *clip_ctx->attention_mask = clip_ctx->attention_mask->to(device);
+    if (clxp_ctx->attention_mask->device() != device) {
+        *clxp_ctx->attention_mask = clxp_ctx->attention_mask->to(device);
     }
 
     // Free allocated memory
@@ -395,58 +391,89 @@ static int get_tokenized_batch(THClipContext *clip_ctx, const char **labels,
     return 0;
 }
 
+static int copy_softmax_units(THModel *th_model, const int *softmax_units, int softmax_units_count)
+{
+    if (softmax_units && softmax_units_count > 0) {
+        th_model->clxp_ctx->softmax_units =
+            (int *)av_malloc_array(softmax_units_count, sizeof(int));
+        if (!th_model->clxp_ctx->softmax_units) {
+            av_log(th_model->ctx, AV_LOG_ERROR,
+                   "Failed to allocate memory for softmax units\n");
+            return AVERROR(ENOMEM);
+        }
+        memcpy(th_model->clxp_ctx->softmax_units, softmax_units,
+               softmax_units_count * sizeof(int));
+        th_model->clxp_ctx->softmax_units_count = softmax_units_count;
+    } else {
+        th_model->clxp_ctx->softmax_units = NULL;
+        th_model->clxp_ctx->softmax_units_count = 0;
+    }
+    return 0;
+}
+
+static int test_clip_inference(THModel *th_model, const c10::Device &device){
+    try {
+        // Should throw exception if not existing
+        auto encode_image = th_model->jit_model->get_method("encode_image");
+        th_model->clxp_ctx->resolution = test_clip_input_res(th_model, device);
+        if (th_model->clxp_ctx->resolution <= 0) {
+            av_log(th_model->ctx, AV_LOG_ERROR,
+                    "Failed to determine input resolution for CLIP model\n");
+            return AVERROR(EINVAL);
+        }
+    } catch (const c10::Error &e) {
+        av_log(th_model->ctx, AV_LOG_ERROR,
+                "Error during CLIP model initialization: %s\n", e.what());
+        return AVERROR(EINVAL);
+    }
+    return 0;
+}
+
+static int test_clap_inference(THModel *th_model, int64_t sample_rate, int64_t sample_duration, const c10::Device &device){
+    try {
+        // Create dummy audio tensor to test model compatibility
+        int target_samples = sample_rate * sample_duration;
+        torch::Tensor dummy_audio = torch::zeros({1, target_samples});
+
+        // Try to move the tensor to the correct device
+        if (dummy_audio.device() != device) {
+            dummy_audio = dummy_audio.to(device);
+        }
+
+        // Test inference with dummy audio using forward method<
+        std::vector<torch::jit::IValue> inputs;
+        inputs.push_back(dummy_audio);
+        inputs.push_back(*th_model->clxp_ctx->tokenized_text);
+        inputs.push_back(*th_model->clxp_ctx->attention_mask);
+
+        auto audio_features = th_model->jit_model->forward(inputs);
+    } catch (const c10::Error &e) {
+        av_log(th_model->ctx, AV_LOG_ERROR,
+                "Error during CLIP model initialization: %s\n", e.what());
+        return AVERROR(EINVAL);
+    }
+    return 0;
+}
+
 static int init_clxp_model(THModel *th_model, DNNFunctionType func_type,
                            const char **labels, int label_count,
-                          const int *softmax_units,
-                           int softmax_units_count, const char *tokenizer_path,
+                           const char *tokenizer_path,
                            const AVFilterContext *filter_ctx)
 {
     c10::Device device = (*th_model->jit_model->parameters().begin()).device();
-    th_model->clip_ctx = (THClipContext *)av_mallocz(sizeof(THClipContext));
-    if (!th_model->clip_ctx) {
+    th_model->clxp_ctx = (THClxpContext *)av_mallocz(sizeof(THClxpContext));
+    if (!th_model->clxp_ctx) {
         av_log(th_model->ctx, AV_LOG_ERROR,
                "Failed to allocate memory for CLIP context\n");
         return AVERROR(ENOMEM);
     }
-    if (func_type == DFT_ANALYTICS_CLIP) {
-        try {
-            // Should throw exception if not existing
-            auto encode_image = th_model->jit_model->get_method("encode_image");
-            th_model->clip_ctx->resolution =
-                get_clip_input_res(th_model, device);
-            if (th_model->clip_ctx->resolution <= 0) {
-                av_log(th_model->ctx, AV_LOG_ERROR,
-                       "Failed to determine input resolution for CLIP model\n");
-                return AVERROR(EINVAL);
-            }
-        } catch (const c10::Error &e) {
-            av_log(th_model->ctx, AV_LOG_ERROR,
-                   "Error during CLIP model initialization: %s\n", e.what());
-            return AVERROR(EINVAL);
-        }
-    }
-    int ret = get_tokenized_batch(th_model->clip_ctx, labels, label_count,
+
+    int ret = get_tokenized_batch(th_model->clxp_ctx, labels, label_count,
                                   tokenizer_path, th_model->ctx, device);
     if (ret < 0) {
         av_log(th_model->ctx, AV_LOG_ERROR,
                "Failed to tokenize batch text for CLIP model\n");
         return ret;
-    }
-
-    if (softmax_units && softmax_units_count > 0) {
-        th_model->clip_ctx->softmax_units =
-            (int *)av_malloc_array(softmax_units_count, sizeof(int));
-        if (!th_model->clip_ctx->softmax_units) {
-            av_log(th_model->ctx, AV_LOG_ERROR,
-                   "Failed to allocate memory for softmax units\n");
-            return AVERROR(ENOMEM);
-        }
-        memcpy(th_model->clip_ctx->softmax_units, softmax_units,
-               softmax_units_count * sizeof(int));
-        th_model->clip_ctx->softmax_units_count = softmax_units_count;
-    } else {
-        th_model->clip_ctx->softmax_units = NULL;
-        th_model->clip_ctx->softmax_units_count = 0;
     }
     return 0;
 }
@@ -582,8 +609,7 @@ static int prepare_audio_tensor(const THModel *th_model,
     DnnContext *ctx = th_model->ctx;
     int ret = 0;
 
-    // Get target duration in samples (7 seconds at 44100Hz = 308700 samples)
-    const int target_samples = CLAP_SAMPLE_RATE * CLAP_SAMPLE_DURATION_SECONDS;
+    const int target_samples = th_model->ctx->torch_option.sample_rate * th_model->ctx->torch_option.sample_duration;
 
     // Validate input frame
     if (!task->in_frame || !task->in_frame->data[0]) {
@@ -595,14 +621,11 @@ static int prepare_audio_tensor(const THModel *th_model,
     float *audio_data = (float *)task->in_frame->data[0];
     int nb_samples = task->in_frame->nb_samples;
 
-    av_log(ctx, AV_LOG_INFO, "Audio input: %d samples at %d Hz\n", nb_samples,
-           task->in_frame->sample_rate);
-
     // Validate audio parameters
-    if (task->in_frame->sample_rate != CLAP_SAMPLE_RATE) {
+    if (task->in_frame->sample_rate != th_model->ctx->torch_option.sample_rate) {
         av_log(ctx, AV_LOG_ERROR,
-               "Sample rate mismatch. Expected %d Hz, got %d Hz\n",
-               CLAP_SAMPLE_RATE, task->in_frame->sample_rate);
+               "Sample rate mismatch. Expected %ld Hz, got %d Hz\n",
+               th_model->ctx->torch_option.sample_rate, task->in_frame->sample_rate);
         return AVERROR(EINVAL);
     }
 
@@ -663,8 +686,8 @@ static int preprocess_image_tensor(const THModel *th_model,
         *input_tensor = torch::nn::functional::interpolate(
             *input_tensor,
             torch::nn::functional::InterpolateFuncOptions()
-                .size(std::vector<int64_t>{th_model->clip_ctx->resolution,
-                                           th_model->clip_ctx->resolution})
+                .size(std::vector<int64_t>{th_model->clxp_ctx->resolution,
+                                           th_model->clxp_ctx->resolution})
                 .mode(torch::kBicubic)
                 .align_corners(false));
         return 0;
@@ -827,10 +850,10 @@ static int th_start_inference(void *args)
 
 #if (CONFIG_LIBTOKENIZERS == 1)
     if (th_model->model.func_type == DFT_ANALYTICS_CLIP) {
-        inputs.push_back(*th_model->clip_ctx->tokenized_text);
+        inputs.push_back(*th_model->clxp_ctx->tokenized_text);
     } else if (th_model->model.func_type == DFT_ANALYTICS_CLAP) {
-        inputs.push_back(*th_model->clip_ctx->tokenized_text);
-        inputs.push_back(*th_model->clip_ctx->attention_mask);
+        inputs.push_back(*th_model->clxp_ctx->tokenized_text);
+        inputs.push_back(*th_model->clxp_ctx->attention_mask);
     }
 #endif
 
@@ -855,8 +878,8 @@ static int th_start_inference(void *args)
                 *infer_request->output = calculate_similarity(media_embeddings, text_embeddings, th_model->ctx->torch_option.normalize, logit_scale, ctx);
             }
             *infer_request->output = apply_softmax(
-                *infer_request->output, th_model->clip_ctx->softmax_units,
-                th_model->clip_ctx->softmax_units_count, ctx);
+                *infer_request->output, th_model->clxp_ctx->softmax_units,
+                th_model->clxp_ctx->softmax_units_count, ctx);
         }
     } else {
         avpriv_report_missing_feature(ctx, "model function type %d",
@@ -1253,17 +1276,46 @@ static DNNModel *dnn_load_model_with_tokenizer_th(
      int *softmax_units, int softmax_units_count,
      const char *tokenizer_path, AVFilterContext *filter_ctx)
 {
+    int ret;
     THModel *th_model = init_model_th(ctx, func_type, filter_ctx);
     if (th_model == NULL) {
         return NULL;
     }
 #if (CONFIG_LIBTOKENIZERS == 1)
     // Check if this is a CLIP model and initialize accordingly
-    if ((func_type == DFT_ANALYTICS_CLIP || func_type == DFT_ANALYTICS_CLAP) &&
-        init_clxp_model(th_model, func_type, labels, label_count,
-                        softmax_units, softmax_units_count,
-                        tokenizer_path,filter_ctx) > 0) {
-        return NULL;
+    auto model = &th_model->model;
+    if ((func_type == DFT_ANALYTICS_CLIP || func_type == DFT_ANALYTICS_CLAP)) {
+        ret = init_clxp_model(th_model, func_type, labels, label_count,
+            tokenizer_path,filter_ctx);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to initialize CLXP model\n");
+            dnn_free_model_th(&model);
+            return NULL;
+        }
+        ret = copy_softmax_units(th_model, softmax_units, softmax_units_count);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to copy softmax units\n");
+            dnn_free_model_th(&model);
+            return NULL;
+        }
+    }
+    c10::Device device = (*th_model->jit_model->parameters().begin()).device();
+
+    if(func_type == DFT_ANALYTICS_CLIP) {
+        ret = test_clip_inference(th_model,device);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to test CLIP inference\n");
+            dnn_free_model_th(&model);
+            return NULL;
+        }
+    }
+    else if(func_type == DFT_ANALYTICS_CLAP){
+        ret = test_clap_inference(th_model, th_model->ctx->torch_option.sample_rate, th_model->ctx->torch_option.sample_duration,device);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "Failed to test CLAP inference\n");
+            dnn_free_model_th(&model);
+            return NULL;
+        }
     }
 #endif
     return &th_model->model;
