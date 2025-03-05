@@ -1,0 +1,16 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 120
+UseTab: Never
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true  # Methode/Funktionsdeklaration → { in nächste Zeile
+  AfterClass: false
+  AfterControlStatement: false  # if, for, while → { bleibt in der gleichen Zeile
+  AfterNamespace: false
+  AfterStruct: false
+  AfterEnum: false
+  AfterExternBlock: false
+  BeforeElse: false
+  BeforeCatch: false
+IndentCaseLabels: true

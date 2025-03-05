@@ -153,7 +153,6 @@ static const AVOption dnn_classify_options[] = {
 
 AVFILTER_DNN_DEFINE_CLASS(dnn_classify, DNN_OV);
 
-
 static void free_label_context(LabelContext *ctx)
 {
     if (!ctx)
@@ -211,11 +210,9 @@ static void free_category_classfication_context(CategoryClassifcationContext *ca
 {
     if (category_classification_ctx) {
         if (category_classification_ctx->category_units) {
-            for (int i = 0; i < category_classification_ctx->num_contexts;
-                 i++) {
+            for (int i = 0; i < category_classification_ctx->num_contexts; i++) {
                 if (category_classification_ctx->category_units[i]) {
-                    free_categories_context(
-                        category_classification_ctx->category_units[i]);
+                    free_categories_context(category_classification_ctx->category_units[i]);
                     av_freep(&category_classification_ctx->category_units[i]);
                 }
             }
@@ -227,17 +224,15 @@ static void free_category_classfication_context(CategoryClassifcationContext *ca
     }
 }
 
-static int read_classify_label_file(AVFilterContext *context,
-                    LabelContext *label_classification_ctx,
-                    char *labels_filename, int max_line_length)
+static int read_classify_label_file(AVFilterContext *context, LabelContext *label_classification_ctx,
+                                    char *labels_filename, int max_line_length)
 {
     int line_len;
     FILE *file;
 
     file = avpriv_fopen_utf8(labels_filename, "r");
     if (!file) {
-        av_log(context, AV_LOG_ERROR, "failed to open file %s\n",
-               labels_filename);
+        av_log(context, AV_LOG_ERROR, "failed to open file %s\n", labels_filename);
         return AVERROR(EINVAL);
     }
 
@@ -259,7 +254,7 @@ static int read_classify_label_file(AVFilterContext *context,
             }
         }
 
-        if (line_len == 0)  // empty line
+        if (line_len == 0) // empty line
             continue;
 
         if (line_len >= max_line_length) {
@@ -270,15 +265,13 @@ static int read_classify_label_file(AVFilterContext *context,
 
         label = av_strdup(buf);
         if (!label) {
-            av_log(context, AV_LOG_ERROR,
-                   "failed to allocate memory for label %s\n", buf);
+            av_log(context, AV_LOG_ERROR, "failed to allocate memory for label %s\n", buf);
             fclose(file);
             return AVERROR(ENOMEM);
         }
 
-        if (av_dynarray_add_nofree(&label_classification_ctx->labels,
-                                   &label_classification_ctx->label_count,
-                                   label) < 0) {
+        if (av_dynarray_add_nofree(&label_classification_ctx->labels, &label_classification_ctx->label_count, label) <
+            0) {
             av_log(context, AV_LOG_ERROR, "failed to do av_dynarray_add\n");
             fclose(file);
             av_freep(&label);
@@ -290,9 +283,8 @@ static int read_classify_label_file(AVFilterContext *context,
     return 0;
 }
 
-static int read_classify_categories_file(AVFilterContext *context,
-                         CategoryClassifcationContext *cat_class_ctx,
-                         char *categories_filename, int max_line_length)
+static int read_classify_categories_file(AVFilterContext *context, CategoryClassifcationContext *cat_class_ctx,
+                                         char *categories_filename, int max_line_length)
 {
     FILE *file;
     char buf[256];
@@ -302,16 +294,14 @@ static int read_classify_categories_file(AVFilterContext *context,
 
     file = avpriv_fopen_utf8(categories_filename, "r");
     if (!file) {
-        av_log(context, AV_LOG_ERROR, "Failed to open categories file %s\n",
-               categories_filename);
+        av_log(context, AV_LOG_ERROR, "Failed to open categories file %s\n", categories_filename);
         return AVERROR(EINVAL);
     }
 
     // Initialize contexts array
     cat_class_ctx->max_contexts = 10;
     cat_class_ctx->num_contexts = 0;
-    cat_class_ctx->category_units =
-        av_calloc(cat_class_ctx->max_contexts, sizeof(CategoriesContext *));
+    cat_class_ctx->category_units = av_calloc(cat_class_ctx->max_contexts, sizeof(CategoriesContext *));
     if (!cat_class_ctx->category_units) {
         fclose(file);
         return AVERROR(ENOMEM);
@@ -323,8 +313,7 @@ static int read_classify_categories_file(AVFilterContext *context,
 
         // Trim whitespace and newlines
         while (line_len > 0 &&
-               (line[line_len - 1] == '\n' || line[line_len - 1] == '\r' ||
-                line[line_len - 1] == ' ')) {
+               (line[line_len - 1] == '\n' || line[line_len - 1] == '\r' || line[line_len - 1] == ' ')) {
             line[--line_len] = '\0';
         }
 
@@ -341,12 +330,10 @@ static int read_classify_categories_file(AVFilterContext *context,
         if (line[0] == '[' && line[line_len - 1] == ']') {
             if (current_ctx != NULL) {
                 // Store previous context
-                if (cat_class_ctx->num_contexts >=
-                    cat_class_ctx->max_contexts) {
+                if (cat_class_ctx->num_contexts >= cat_class_ctx->max_contexts) {
                     int new_size = cat_class_ctx->max_contexts * 2;
                     CategoriesContext **new_contexts =
-                        av_realloc_array(cat_class_ctx->category_units,
-                                         new_size, sizeof(CategoriesContext *));
+                        av_realloc_array(cat_class_ctx->category_units, new_size, sizeof(CategoriesContext *));
                     if (!new_contexts) {
                         ret = AVERROR(ENOMEM);
                         goto end;
@@ -354,8 +341,7 @@ static int read_classify_categories_file(AVFilterContext *context,
                     cat_class_ctx->category_units = new_contexts;
                     cat_class_ctx->max_contexts = new_size;
                 }
-                cat_class_ctx->category_units[cat_class_ctx->num_contexts++] =
-                    current_ctx;
+                cat_class_ctx->category_units[cat_class_ctx->num_contexts++] = current_ctx;
             }
 
             // Create new context
@@ -376,8 +362,7 @@ static int read_classify_categories_file(AVFilterContext *context,
 
             current_ctx->category_count = 0;
             current_ctx->max_categories = 10;
-            current_ctx->categories =
-                av_calloc(current_ctx->max_categories, sizeof(CategoryContext));
+            current_ctx->categories = av_calloc(current_ctx->max_categories, sizeof(CategoryContext));
             if (!current_ctx->categories) {
                 av_freep(&current_ctx->name);
                 av_freep(&current_ctx);
@@ -390,16 +375,15 @@ static int read_classify_categories_file(AVFilterContext *context,
         // Check for category marker (CategoryName)
         else if (line[0] == '(' && line[line_len - 1] == ')') {
             if (!current_ctx) {
-                av_log(context, AV_LOG_ERROR,
-                       "Category found without context\n");
+                av_log(context, AV_LOG_ERROR, "Category found without context\n");
                 ret = AVERROR(EINVAL);
                 goto end;
             }
 
             if (current_ctx->category_count >= current_ctx->max_categories) {
                 int new_size = current_ctx->max_categories * 2;
-                CategoryContext *new_categories = av_realloc_array(
-                    current_ctx->categories, new_size, sizeof(CategoryContext));
+                CategoryContext *new_categories =
+                    av_realloc_array(current_ctx->categories, new_size, sizeof(CategoryContext));
                 if (!new_categories) {
                     ret = AVERROR(ENOMEM);
                     goto end;
@@ -409,8 +393,7 @@ static int read_classify_categories_file(AVFilterContext *context,
             }
 
             line[line_len - 1] = '\0';
-            current_category =
-                &current_ctx->categories[current_ctx->category_count++];
+            current_category = &current_ctx->categories[current_ctx->category_count++];
             cat_class_ctx->total_categories++;
 
             current_category->name = av_strdup(line + 1);
@@ -436,8 +419,7 @@ static int read_classify_categories_file(AVFilterContext *context,
                 goto end;
             }
 
-            if (av_dynarray_add_nofree(&current_category->labels->labels,
-                                       &current_category->labels->label_count,
+            if (av_dynarray_add_nofree(&current_category->labels->labels, &current_category->labels->label_count,
                                        label) < 0) {
                 av_freep(&label);
                 ret = AVERROR(ENOMEM);
@@ -455,8 +437,7 @@ static int read_classify_categories_file(AVFilterContext *context,
         if (cat_class_ctx->num_contexts >= cat_class_ctx->max_contexts) {
             int new_size = cat_class_ctx->max_contexts * 2;
             CategoriesContext **new_contexts =
-                av_realloc_array(cat_class_ctx->category_units, new_size,
-                                 sizeof(CategoriesContext *));
+                av_realloc_array(cat_class_ctx->category_units, new_size, sizeof(CategoriesContext *));
             if (!new_contexts) {
                 ret = AVERROR(ENOMEM);
                 goto end;
@@ -464,8 +445,7 @@ static int read_classify_categories_file(AVFilterContext *context,
             cat_class_ctx->category_units = new_contexts;
             cat_class_ctx->max_contexts = new_size;
         }
-        cat_class_ctx->category_units[cat_class_ctx->num_contexts++] =
-            current_ctx;
+        cat_class_ctx->category_units[cat_class_ctx->num_contexts++] = current_ctx;
     }
 
 end:
@@ -513,8 +493,7 @@ static int combine_all_category_labels(LabelContext **label_ctx, CategoryClassif
     return 0;
 }
 
-static int get_category_total_label_count(CategoryClassifcationContext *cat_ctx,
-                                     int **label_counts)
+static int get_category_total_label_count(CategoryClassifcationContext *cat_ctx, int **label_counts)
 {
     if (!cat_ctx || cat_ctx->num_contexts <= 0) {
         return 0;
@@ -539,8 +518,7 @@ static int get_category_total_label_count(CategoryClassifcationContext *cat_ctx,
     return cat_ctx->num_contexts;
 }
 
-static CategoryContext *get_best_category(CategoriesContext *categories_ctx,
-                                          float *probabilities)
+static CategoryContext *get_best_category(CategoriesContext *categories_ctx, float *probabilities)
 {
     CategoryContext *best_category = NULL;
     float best_probability = -1.0f;
@@ -552,10 +530,8 @@ static CategoryContext *get_best_category(CategoriesContext *categories_ctx,
 
         // Sum probabilities for all labels in this category
         category->total_probability = 0.0f;
-        for (int label_idx = 0; label_idx < category->label_count;
-             label_idx++) {
-            category->total_probability +=
-                probabilities[prob_offset + label_idx];
+        for (int label_idx = 0; label_idx < category->label_count; label_idx++) {
+            category->total_probability += probabilities[prob_offset + label_idx];
         }
 
         if (category->total_probability > best_probability) {
@@ -569,10 +545,8 @@ static CategoryContext *get_best_category(CategoriesContext *categories_ctx,
     return best_category;
 }
 
-
-static AVDetectionBBox *find_or_create_detection_bbox(
-    AVFrame *frame, uint32_t bbox_index, AVFilterContext *filter_ctx,
-    DnnClassifyContext *ctx)
+static AVDetectionBBox *find_or_create_detection_bbox(AVFrame *frame, uint32_t bbox_index, AVFilterContext *filter_ctx,
+                                                      DnnClassifyContext *ctx)
 {
     AVFrameSideData *sd;
     AVDetectionBBoxHeader *header;
@@ -582,8 +556,7 @@ static AVDetectionBBox *find_or_create_detection_bbox(
     if (!sd) {
         header = av_detection_bbox_create_side_data(frame, 1);
         if (!header) {
-            av_log(filter_ctx, AV_LOG_ERROR,
-                   "Cannot get side data in labels processing\n");
+            av_log(filter_ctx, AV_LOG_ERROR, "Cannot get side data in labels processing\n");
             return NULL;
         }
     } else {
@@ -592,8 +565,7 @@ static AVDetectionBBox *find_or_create_detection_bbox(
 
     if (bbox_index == 0) {
         av_strlcat(header->source, ", ", sizeof(header->source));
-        av_strlcat(header->source, ctx->dnnctx.model_filename,
-                   sizeof(header->source));
+        av_strlcat(header->source, ctx->dnnctx.model_filename, sizeof(header->source));
     }
 
     // Get bbox for current index
@@ -607,8 +579,7 @@ static AVDetectionBBox *find_or_create_detection_bbox(
 }
 
 // Processing functions for standard classification (video only)
-static int post_proc_standard(AVFrame *frame, DNNData *output,
-                              uint32_t bbox_index, AVFilterContext *filter_ctx)
+static int post_proc_standard(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
     DnnClassifyContext *ctx = filter_ctx->priv;
     float conf_threshold = ctx->confidence;
@@ -626,8 +597,7 @@ static int post_proc_standard(AVFrame *frame, DNNData *output,
 
     sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
     if (!sd) {
-        av_log(filter_ctx, AV_LOG_ERROR,
-               "Cannot get side data in post_proc_standard\n");
+        av_log(filter_ctx, AV_LOG_ERROR, "Cannot get side data in post_proc_standard\n");
         return -1;
     }
     header = (AVDetectionBBoxHeader *)sd->data;
@@ -652,17 +622,13 @@ static int post_proc_standard(AVFrame *frame, DNNData *output,
     }
 
     bbox = av_get_detection_bbox(header, bbox_index);
-    bbox->classify_confidences[bbox->classify_count] =
-        av_make_q((int)(confidence * 10000), 10000);
+    bbox->classify_confidences[bbox->classify_count] = av_make_q((int)(confidence * 10000), 10000);
 
-    if (ctx->label_classification_ctx->labels &&
-        label_id < ctx->label_classification_ctx->label_count) {
-        av_strlcpy(bbox->classify_labels[bbox->classify_count],
-                   ctx->label_classification_ctx->labels[label_id],
+    if (ctx->label_classification_ctx->labels && label_id < ctx->label_classification_ctx->label_count) {
+        av_strlcpy(bbox->classify_labels[bbox->classify_count], ctx->label_classification_ctx->labels[label_id],
                    sizeof(bbox->classify_labels[bbox->classify_count]));
     } else {
-        snprintf(bbox->classify_labels[bbox->classify_count],
-                 sizeof(bbox->classify_labels[bbox->classify_count]), "%d",
+        snprintf(bbox->classify_labels[bbox->classify_count], sizeof(bbox->classify_labels[bbox->classify_count]), "%d",
                  label_id);
     }
     bbox->classify_count++;
@@ -670,9 +636,7 @@ static int post_proc_standard(AVFrame *frame, DNNData *output,
     return 0;
 }
 
-static int post_proc_clxp_labels(AVFrame *frame, DNNData *output,
-                                 uint32_t bbox_index,
-                                 AVFilterContext *filter_ctx)
+static int post_proc_clxp_labels(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
     DnnClassifyContext *ctx = filter_ctx->priv;
     const int max_classes_per_box = AV_NUM_DETECTION_BBOX_CLASSIFY;
@@ -687,24 +651,19 @@ static int post_proc_clxp_labels(AVFrame *frame, DNNData *output,
         return AVERROR(EINVAL);
     }
 
-    ret = av_detection_bbox_fill_with_best_labels(ctx->label_classification_ctx->labels,
-                                     probabilities, num_labels, bbox,
-                                     max_classes_per_box, confidence_threshold);
+    ret = av_detection_bbox_fill_with_best_labels(ctx->label_classification_ctx->labels, probabilities, num_labels,
+                                                  bbox, max_classes_per_box, confidence_threshold);
     if (ret < 0) {
-        av_log(filter_ctx, AV_LOG_ERROR,
-               "Failed to fill bbox with best labels\n");
+        av_log(filter_ctx, AV_LOG_ERROR, "Failed to fill bbox with best labels\n");
         return ret;
     }
     return 0;
 }
 
-static int post_proc_clxp_categories(AVFrame *frame, DNNData *output,
-                                     uint32_t bbox_index,
-                                     AVFilterContext *filter_ctx)
+static int post_proc_clxp_categories(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
     DnnClassifyContext *ctx = filter_ctx->priv;
-    CategoryClassifcationContext *cat_class_ctx =
-        ctx->category_classification_ctx;
+    CategoryClassifcationContext *cat_class_ctx = ctx->category_classification_ctx;
     CategoryContext *best_category;
     AVDetectionBBox *bbox;
     float *probabilities = output->data;
@@ -747,8 +706,7 @@ static int post_proc_clxp_categories(AVFrame *frame, DNNData *output,
 
     // Process each context
     for (int ctx_idx = 0; ctx_idx < cat_class_ctx->num_contexts; ctx_idx++) {
-        CategoriesContext *categories_ctx =
-            cat_class_ctx->category_units[ctx_idx];
+        CategoriesContext *categories_ctx = cat_class_ctx->category_units[ctx_idx];
         if (!categories_ctx) {
             av_log(filter_ctx, AV_LOG_ERROR, "Missing classification data at context %d\n", ctx_idx);
             continue;
@@ -769,7 +727,8 @@ static int post_proc_clxp_categories(AVFrame *frame, DNNData *output,
     }
 
     // Fill bbox with best labels
-    ret = av_detection_bbox_fill_with_best_labels(ctx_labels, ctx_probabilities, cat_class_ctx->num_contexts, bbox, AV_NUM_DETECTION_BBOX_CLASSIFY, ctx->confidence);
+    ret = av_detection_bbox_fill_with_best_labels(ctx_labels, ctx_probabilities, cat_class_ctx->num_contexts, bbox,
+                                                  AV_NUM_DETECTION_BBOX_CLASSIFY, ctx->confidence);
 
     // Clean up
     for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
@@ -781,21 +740,17 @@ static int post_proc_clxp_categories(AVFrame *frame, DNNData *output,
     return ret;
 }
 
-static int dnn_classify_post_proc(AVFrame *frame, DNNData *output,
-                                  uint32_t bbox_index,
-                                  AVFilterContext *filter_ctx)
+static int dnn_classify_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
     DnnClassifyContext *ctx = filter_ctx->priv;
 
     if (ctx->dnnctx.backend_type == DNN_TH) {
         if (ctx->category_classification_ctx) {
-            return post_proc_clxp_categories(frame, output, bbox_index,
-                                             filter_ctx);
+            return post_proc_clxp_categories(frame, output, bbox_index, filter_ctx);
         } else if (ctx->label_classification_ctx) {
             return post_proc_clxp_labels(frame, output, bbox_index, filter_ctx);
         }
-        av_log(filter_ctx, AV_LOG_ERROR,
-               "No valid classification context available\n");
+        av_log(filter_ctx, AV_LOG_ERROR, "No valid classification context available\n");
         return AVERROR(EINVAL);
     } else {
         return post_proc_standard(frame, output, bbox_index, filter_ctx);
@@ -844,8 +799,7 @@ static int config_input(AVFilterLink *inlink)
 
     // Validate media type
     if (ctx->type != AVMEDIA_TYPE_AUDIO && ctx->type != AVMEDIA_TYPE_VIDEO) {
-        av_log(context, AV_LOG_ERROR,
-               "Invalid media type. Only audio or video is supported\n");
+        av_log(context, AV_LOG_ERROR, "Invalid media type. Only audio or video is supported\n");
         return AVERROR(EINVAL);
     }
 
@@ -855,14 +809,12 @@ static int config_input(AVFilterLink *inlink)
 
         // Check backend compatibility
         if (ctx->dnnctx.backend_type != DNN_TH) {
-            av_log(context, AV_LOG_ERROR,
-                   "Audio classification requires Torch backend\n");
+            av_log(context, AV_LOG_ERROR, "Audio classification requires Torch backend\n");
             return AVERROR(EINVAL);
         }
 
         if (inlink->sample_rate != sample_rate) {
-            av_log(context, AV_LOG_ERROR,
-                   "Invalid sample rate. CLAP requires 44100 Hz\n");
+            av_log(context, AV_LOG_ERROR, "Invalid sample rate. CLAP requires 44100 Hz\n");
             return AVERROR(EINVAL);
         }
 
@@ -871,9 +823,7 @@ static int config_input(AVFilterLink *inlink)
         outlink->ch_layout = inlink->ch_layout;
     } else {
         // Video mode
-        goal_mode = (ctx->dnnctx.backend_type == DNN_TH)
-                        ? DFT_ANALYTICS_CLIP
-                        : DFT_ANALYTICS_CLASSIFY;
+        goal_mode = (ctx->dnnctx.backend_type == DNN_TH) ? DFT_ANALYTICS_CLIP : DFT_ANALYTICS_CLASSIFY;
     }
     // Initialize label and category contexts based on provided files
     if (ctx->dnnctx.backend_type == DNN_TH) {
@@ -882,38 +832,33 @@ static int config_input(AVFilterLink *inlink)
             if (!ctx->label_classification_ctx)
                 return AVERROR(ENOMEM);
 
-            ret = read_classify_label_file(context, ctx->label_classification_ctx,
-                                  ctx->labels_filename,
-                                  AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+            ret = read_classify_label_file(context, ctx->label_classification_ctx, ctx->labels_filename,
+                                           AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
             if (ret < 0) {
                 av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
                 return ret;
             }
-            ret = ff_dnn_init_with_tokenizer(
-                &ctx->dnnctx, goal_mode, ctx->label_classification_ctx->labels,
-                ctx->label_classification_ctx->label_count, NULL, 0, ctx->tokenizer_path,
-                context);
+            ret = ff_dnn_init_with_tokenizer(&ctx->dnnctx, goal_mode, ctx->label_classification_ctx->labels,
+                                             ctx->label_classification_ctx->label_count, NULL, 0, ctx->tokenizer_path,
+                                             context);
             if (ret < 0) {
                 free_contexts(ctx);
                 return ret;
             }
         } else if (ctx->categories_filename) {
-            ctx->category_classification_ctx =
-                av_calloc(1, sizeof(CategoryClassifcationContext));
+            ctx->category_classification_ctx = av_calloc(1, sizeof(CategoryClassifcationContext));
             if (!ctx->category_classification_ctx)
                 return AVERROR(ENOMEM);
 
-            ret = read_classify_categories_file(context, ctx->category_classification_ctx,
-                                     ctx->categories_filename,
-                                     AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+            ret = read_classify_categories_file(context, ctx->category_classification_ctx, ctx->categories_filename,
+                                                AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
             if (ret < 0) {
                 av_log(context, AV_LOG_ERROR, "Failed to read categories file\n");
                 free_contexts(ctx);
                 return ret;
             }
-            
-            ret = combine_all_category_labels(&ctx->label_classification_ctx,
-                                              ctx->category_classification_ctx);
+
+            ret = combine_all_category_labels(&ctx->label_classification_ctx, ctx->category_classification_ctx);
             if (ret < 0) {
                 av_log(context, AV_LOG_ERROR, "Failed to combine labels\n");
                 free_contexts(ctx);
@@ -923,8 +868,7 @@ static int config_input(AVFilterLink *inlink)
             int total_labels;
             int *label_counts = NULL;
 
-            total_labels = get_category_total_label_count(ctx->category_classification_ctx,
-                                            &label_counts);
+            total_labels = get_category_total_label_count(ctx->category_classification_ctx, &label_counts);
             if (total_labels <= 0) {
                 av_log(context, AV_LOG_ERROR, "Failed to get category label counts or no labels found\n");
                 free_contexts(ctx);
@@ -932,11 +876,9 @@ static int config_input(AVFilterLink *inlink)
             }
 
             // Initialize DNN with tokenizer for CLIP/CLAP models
-            ret = ff_dnn_init_with_tokenizer(
-                &ctx->dnnctx, goal_mode, ctx->label_classification_ctx->labels,
-                ctx->label_classification_ctx->label_count,
-                label_counts, total_labels, ctx->tokenizer_path,
-                context);
+            ret = ff_dnn_init_with_tokenizer(&ctx->dnnctx, goal_mode, ctx->label_classification_ctx->labels,
+                                             ctx->label_classification_ctx->label_count, label_counts, total_labels,
+                                             ctx->tokenizer_path, context);
             if (ret < 0) {
                 av_freep(&label_counts);
                 free_contexts(ctx);
@@ -955,9 +897,8 @@ static int config_input(AVFilterLink *inlink)
         if (!ctx->label_classification_ctx)
             return AVERROR(ENOMEM);
 
-        ret = read_classify_label_file(context, ctx->label_classification_ctx,
-                              ctx->labels_filename,
-                              AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+        ret = read_classify_label_file(context, ctx->label_classification_ctx, ctx->labels_filename,
+                                       AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
         if (ret < 0) {
             av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
             free_contexts(ctx);
@@ -1000,55 +941,44 @@ static av_cold int dnn_classify_init(AVFilterContext *context)
     if (ctx->dnnctx.backend_type == DNN_TH) {
         // Check CLIP/CLAP specific parameters
         if (ctx->labels_filename && ctx->categories_filename) {
-            av_log(context, AV_LOG_ERROR,
-                   "Labels and categories file cannot be used together\n");
+            av_log(context, AV_LOG_ERROR, "Labels and categories file cannot be used together\n");
             return AVERROR(EINVAL);
         }
 
         if (!ctx->labels_filename && !ctx->categories_filename) {
-            av_log(
-                context, AV_LOG_ERROR,
-                "Labels or categories file is required for classification\n");
+            av_log(context, AV_LOG_ERROR, "Labels or categories file is required for classification\n");
             return AVERROR(EINVAL);
         }
 
         if (!ctx->tokenizer_path) {
-            av_log(context, AV_LOG_ERROR,
-                   "Tokenizer file is required for CLIP/CLAP classification\n");
+            av_log(context, AV_LOG_ERROR, "Tokenizer file is required for CLIP/CLAP classification\n");
             return AVERROR(EINVAL);
         }
     } else if (ctx->dnnctx.backend_type == DNN_OV) {
         // Check OpenVINO specific parameters
         if (!ctx->labels_filename) {
-            av_log(context, AV_LOG_ERROR,
-                   "Labels file is required for classification\n");
+            av_log(context, AV_LOG_ERROR, "Labels file is required for classification\n");
             return AVERROR(EINVAL);
         }
 
         if (ctx->categories_filename) {
-            av_log(context, AV_LOG_ERROR,
-                   "Categories file is only supported for CLIP/CLAP models\n");
+            av_log(context, AV_LOG_ERROR, "Categories file is only supported for CLIP/CLAP models\n");
             return AVERROR(EINVAL);
         }
 
         // Audio classification is not supported with OpenVINO backend
         if (ctx->is_audio) {
-            av_log(context, AV_LOG_ERROR,
-                   "Audio classification requires Torch backend\n");
+            av_log(context, AV_LOG_ERROR, "Audio classification requires Torch backend\n");
             return AVERROR(EINVAL);
         }
     }
     return 0;
 }
 
-static const enum AVPixelFormat pix_fmts[] = {
-    AV_PIX_FMT_RGB24, AV_PIX_FMT_BGR24,
-    AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAYF32,
-    AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
-    AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
-    AV_PIX_FMT_NV12,
-    AV_PIX_FMT_NONE
-};
+static const enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_RGB24,   AV_PIX_FMT_BGR24,   AV_PIX_FMT_GRAY8,
+                                              AV_PIX_FMT_GRAYF32, AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
+                                              AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
+                                              AV_PIX_FMT_NV12,    AV_PIX_FMT_NONE};
 
 static const enum AVSampleFormat sample_fmts[] = {AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_NONE};
 
@@ -1065,17 +995,16 @@ static int query_formats(AVFilterContext *ctx)
         if (ret < 0)
             return ret;
     } else if (type == AVMEDIA_TYPE_AUDIO) {
-        
 
         ret = ff_set_common_formats(ctx, ff_make_format_list(sample_fmts));
         if (ret < 0)
             return ret;
-        #if (CONFIG_LIBTORCH == 1)
+#if (CONFIG_LIBTORCH == 1)
         ret = ff_set_common_samplerates(
             ctx, ff_make_format_list((const int[]){classify_ctx->dnnctx.torch_option.sample_rate, -1}));
         if (ret < 0)
             return ret;
-        #endif
+#endif
         ret = ff_set_common_channel_layouts(ctx, ff_all_channel_layouts());
         if (ret < 0)
             return ret;
@@ -1086,8 +1015,7 @@ static int query_formats(AVFilterContext *ctx)
 
     return 0;
 }
-static int dnn_classify_flush_frame(AVFilterLink *outlink, int64_t pts,
-                                    int64_t *out_pts)
+static int dnn_classify_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
 {
     AVFilterContext *context = outlink->src;
     DnnClassifyContext *ctx = context->priv;
@@ -1121,13 +1049,10 @@ static int process_video_frame(DnnClassifyContext *ctx, AVFrame *frame)
     int ret;
 
     if (ctx->dnnctx.backend_type == DNN_TH) {
-        ret = ff_dnn_execute_model_clip(
-            &ctx->dnnctx, frame, NULL, ctx->label_classification_ctx->labels,
-            ctx->label_classification_ctx->label_count, ctx->tokenizer_path,
-            ctx->target);
+        ret = ff_dnn_execute_model_clip(&ctx->dnnctx, frame, NULL, ctx->label_classification_ctx->labels,
+                                        ctx->label_classification_ctx->label_count, ctx->tokenizer_path, ctx->target);
     } else {
-        ret = ff_dnn_execute_model_classification(&ctx->dnnctx, frame, NULL,
-                                                  ctx->target);
+        ret = ff_dnn_execute_model_classification(&ctx->dnnctx, frame, NULL, ctx->target);
     }
 
     if (ret != 0) {
@@ -1140,9 +1065,8 @@ static int process_video_frame(DnnClassifyContext *ctx, AVFrame *frame)
 
 static int process_audio_frame(DnnClassifyContext *ctx, AVFrame *frame)
 {
-    int ret = ff_dnn_execute_model_clap(
-        &ctx->dnnctx, frame, NULL, ctx->label_classification_ctx->labels,
-        ctx->label_classification_ctx->label_count, ctx->tokenizer_path);
+    int ret = ff_dnn_execute_model_clap(&ctx->dnnctx, frame, NULL, ctx->label_classification_ctx->labels,
+                                        ctx->label_classification_ctx->label_count, ctx->tokenizer_path);
 
     if (ret != 0) {
         av_frame_free(&frame);
@@ -1152,7 +1076,8 @@ static int process_audio_frame(DnnClassifyContext *ctx, AVFrame *frame)
     return 0;
 }
 
-static int process_audio_buffer(DnnClassifyContext *ctx, AVFilterLink *inlink){
+static int process_audio_buffer(DnnClassifyContext *ctx, AVFilterLink *inlink)
+{
     static AVFrame *audio_buffer = NULL;
     static int buffer_offset = 0;
     int64_t required_samples = ctx->dnnctx.torch_option.sample_rate * ctx->dnnctx.torch_option.sample_duration;
@@ -1165,7 +1090,7 @@ static int process_audio_buffer(DnnClassifyContext *ctx, AVFilterLink *inlink){
             return ret;
         if (ret == 0)
             break; // No more frames available right now
-            
+
         // First frame - initialize our buffer
         if (!audio_buffer) {
             audio_buffer = av_frame_alloc();
@@ -1173,14 +1098,14 @@ static int process_audio_buffer(DnnClassifyContext *ctx, AVFilterLink *inlink){
                 av_frame_free(&in);
                 return AVERROR(ENOMEM);
             }
-            
+
             // Allocate our buffer to hold exactly required_samples
             audio_buffer->format = in->format;
             audio_buffer->ch_layout = in->ch_layout;
             audio_buffer->sample_rate = in->sample_rate;
             audio_buffer->nb_samples = required_samples;
             audio_buffer->pts = in->pts;
-            
+
             ret = av_frame_get_buffer(audio_buffer, 0);
             if (ret < 0) {
                 av_frame_free(&audio_buffer);
@@ -1188,27 +1113,26 @@ static int process_audio_buffer(DnnClassifyContext *ctx, AVFilterLink *inlink){
                 return ret;
             }
         }
-        
+
         // Copy samples to our buffer
         samples_to_copy = FFMIN(in->nb_samples, required_samples - buffer_offset);
         for (int ch = 0; ch < inlink->ch_layout.nb_channels; ch++) {
-            if(!in->data[ch] || !audio_buffer->data[ch]) {
+            if (!in->data[ch] || !audio_buffer->data[ch]) {
                 continue;
             }
-            memcpy((float*)audio_buffer->data[ch] + buffer_offset, 
-                   (float*)in->data[ch], 
+            memcpy((float *)audio_buffer->data[ch] + buffer_offset, (float *)in->data[ch],
                    samples_to_copy * sizeof(float));
         }
-        
+
         buffer_offset += samples_to_copy;
         av_frame_free(&in);
-        
+
         // If we've filled our buffer, process it
         if (buffer_offset >= required_samples) {
             ret = process_audio_frame(ctx, audio_buffer);
             if (ret < 0)
                 return ret;
-                
+
             // Reset for next frame
             audio_buffer = NULL;
             buffer_offset = 0;
@@ -1217,7 +1141,6 @@ static int process_audio_buffer(DnnClassifyContext *ctx, AVFilterLink *inlink){
     }
     return ret;
 }
-
 
 static int dnn_classify_activate(AVFilterContext *context)
 {
@@ -1242,7 +1165,7 @@ static int dnn_classify_activate(AVFilterContext *context)
 
     if (ctx->type == AVMEDIA_TYPE_AUDIO) {
         ret = process_audio_buffer(ctx, inlink);
-        if(ret < 0){
+        if (ret < 0) {
             return ret;
         }
     } else {

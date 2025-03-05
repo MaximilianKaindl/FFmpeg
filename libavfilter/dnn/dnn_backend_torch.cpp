@@ -24,24 +24,24 @@
  */
 
 extern "C" {
-#include "dnn_io_proc.h"
-#include "dnn_backend_common.h"
 #include "../dnn_filter_common.h"
-#include "libavutil/opt.h"
+#include "dnn_backend_common.h"
+#include "dnn_io_proc.h"
+#include "libavutil/avassert.h"
+#include "libavutil/avstring.h"
+#include "libavutil/detection_bbox.h"
 #include "libavutil/mem.h"
+#include "libavutil/opt.h"
 #include "queue.h"
 #include "safe_queue.h"
-#include "libavutil/avassert.h"
-#include "libavutil/detection_bbox.h"
-#include "libavutil/avstring.h"
 }
 
-#include <torch/torch.h>
 #include <torch/script.h>
+#include <torch/torch.h>
 
 #if (HAVE_LIBTORCH_CUDA == 1)
-#include <c10/cuda/CUDAStream.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAStream.h>
 #endif
 
 typedef struct THClxpContext {
@@ -75,50 +75,21 @@ typedef struct THRequestItem {
     DNNAsyncExecModule exec_module;
 } THRequestItem;
 
-
 #define OFFSET(x) offsetof(THOptions, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM
 static const AVOption dnn_th_options[] = {
-    {"optimize","turn on graph executor optimization",
-        OFFSET(optimize), AV_OPT_TYPE_INT, {.i64 = 0}, 0,1,FLAGS},
+    {"optimize", "turn on graph executor optimization", OFFSET(optimize), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS},
     {NULL}};
 
-static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task,
-                                    Queue *lltask_queue,
+static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Queue *lltask_queue,
                                     DNNExecBaseParams *exec_params)
 {
     THModel *th_model = (THModel *)task->model;
     DnnContext *ctx = th_model->ctx;
 
     switch (func_type) {
-    case DFT_PROCESS_FRAME:
-    case DFT_ANALYTICS_CLAP: {
-        LastLevelTaskItem *lltask =
-            (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
-        if (!lltask) {
-            av_log(ctx, AV_LOG_ERROR,
-                   "Failed to allocate memory for LastLevelTaskItem\n");
-            return AVERROR(ENOMEM);
-        }
-        task->inference_todo = 1;
-        task->inference_done = 0;
-        lltask->bbox_index = 0;
-        lltask->task = task;
-        if (ff_queue_push_back(lltask_queue, lltask) < 0) {
-            av_log(ctx, AV_LOG_ERROR, "Failed to push back lltask_queue.\n");
-            av_freep(&lltask);
-            return AVERROR(ENOMEM);
-        }
-        return 0;
-    }
-    case DFT_ANALYTICS_CLIP:{
-        const AVDetectionBBoxHeader *header;
-        AVFrame *frame = task->in_frame;
-        AVFrameSideData *sd;
-        LastLevelTaskItem *lltask;
-        DNNExecZeroShotClassificationParams *params = (DNNExecZeroShotClassificationParams *)exec_params;
-
-        if(params->target == NULL){
+        case DFT_PROCESS_FRAME:
+        case DFT_ANALYTICS_CLAP: {
             LastLevelTaskItem *lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
             if (!lltask) {
                 av_log(ctx, AV_LOG_ERROR, "Failed to allocate memory for LastLevelTaskItem\n");
@@ -135,46 +106,70 @@ static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task,
             }
             return 0;
         }
+        case DFT_ANALYTICS_CLIP: {
+            const AVDetectionBBoxHeader *header;
+            AVFrame *frame = task->in_frame;
+            AVFrameSideData *sd;
+            LastLevelTaskItem *lltask;
+            DNNExecZeroShotClassificationParams *params = (DNNExecZeroShotClassificationParams *)exec_params;
 
-        task->inference_todo = 0;
-        task->inference_done = 0;
-
-        if (!ff_dnn_contain_valid_detection_bbox(frame)) {
-            return 0;
-        }
-
-        sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
-        header = (const AVDetectionBBoxHeader *)sd->data;
-
-        for (uint32_t i = 0; i < header->nb_bboxes; i++) {
-            const AVDetectionBBox *bbox = av_get_detection_bbox(header, i);
-            if (bbox->w * bbox->h <= 0) {
-                continue;
+            if (params->target == NULL) {
+                LastLevelTaskItem *lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
+                if (!lltask) {
+                    av_log(ctx, AV_LOG_ERROR, "Failed to allocate memory for LastLevelTaskItem\n");
+                    return AVERROR(ENOMEM);
+                }
+                task->inference_todo = 1;
+                task->inference_done = 0;
+                lltask->bbox_index = 0;
+                lltask->task = task;
+                if (ff_queue_push_back(lltask_queue, lltask) < 0) {
+                    av_log(ctx, AV_LOG_ERROR, "Failed to push back lltask_queue.\n");
+                    av_freep(&lltask);
+                    return AVERROR(ENOMEM);
+                }
+                return 0;
             }
-            if (params->target) {
-                if (av_strncasecmp(bbox->detect_label, params->target, sizeof(bbox->detect_label)) != 0) {
+
+            task->inference_todo = 0;
+            task->inference_done = 0;
+
+            if (!ff_dnn_contain_valid_detection_bbox(frame)) {
+                return 0;
+            }
+
+            sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DETECTION_BBOXES);
+            header = (const AVDetectionBBoxHeader *)sd->data;
+
+            for (uint32_t i = 0; i < header->nb_bboxes; i++) {
+                const AVDetectionBBox *bbox = av_get_detection_bbox(header, i);
+                if (bbox->w * bbox->h <= 0) {
                     continue;
                 }
-            }
+                if (params->target) {
+                    if (av_strncasecmp(bbox->detect_label, params->target, sizeof(bbox->detect_label)) != 0) {
+                        continue;
+                    }
+                }
 
-            lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
-            if (!lltask) {
-                return AVERROR(ENOMEM);
+                lltask = (LastLevelTaskItem *)av_malloc(sizeof(*lltask));
+                if (!lltask) {
+                    return AVERROR(ENOMEM);
+                }
+                task->inference_todo++;
+                lltask->task = task;
+                lltask->bbox_index = i;
+                if (ff_queue_push_back(lltask_queue, lltask) < 0) {
+                    av_freep(&lltask);
+                    return AVERROR(ENOMEM);
+                }
             }
-            task->inference_todo++;
-            lltask->task = task;
-            lltask->bbox_index = i;
-            if (ff_queue_push_back(lltask_queue, lltask) < 0) {
-                av_freep(&lltask);
-                return AVERROR(ENOMEM);
-            }
+            return 0;
         }
-        return 0;
-    }
-    default:{
-        av_assert0(!"should not reach here");
-        return AVERROR(EINVAL);
-    }
+        default: {
+            av_assert0(!"should not reach here");
+            return AVERROR(EINVAL);
+        }
     }
 }
 
@@ -183,11 +178,11 @@ static void th_free_request(THInferRequest *request)
     if (!request)
         return;
     if (request->output) {
-        delete(request->output);
+        delete (request->output);
         request->output = NULL;
     }
     if (request->input_tensor) {
-        delete(request->input_tensor);
+        delete (request->input_tensor);
         request->input_tensor = NULL;
     }
     return;
@@ -230,15 +225,13 @@ static void dnn_free_model_th(DNNModel **model)
 
     th_model = (THModel *)(*model);
     while (ff_safe_queue_size(th_model->request_queue) != 0) {
-        THRequestItem *item =
-            (THRequestItem *)ff_safe_queue_pop_front(th_model->request_queue);
+        THRequestItem *item = (THRequestItem *)ff_safe_queue_pop_front(th_model->request_queue);
         destroy_request_item(&item);
     }
     ff_safe_queue_destroy(th_model->request_queue);
 
     while (ff_queue_size(th_model->lltask_queue) != 0) {
-        LastLevelTaskItem *item =
-            (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
+        LastLevelTaskItem *item = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
         av_freep(&item);
     }
     ff_queue_destroy(th_model->lltask_queue);
@@ -270,17 +263,12 @@ static int get_input_th(DNNModel *model, DNNData *input, const char *input_name)
     return 0;
 }
 
-static void deleter(void *arg)
-{
-    av_freep(&arg);
-}
-
+static void deleter(void *arg) { av_freep(&arg); }
 
 #if (CONFIG_LIBTOKENIZERS == 1)
 
-static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
-    int label_count, const char *tokenizer_path,
-    DnnContext *ctx, const c10::Device &device)
+static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels, int label_count,
+                               const char *tokenizer_path, DnnContext *ctx, const c10::Device &device)
 {
     // Early validation to avoid unnecessary processing
     if (!labels || label_count <= 0) {
@@ -296,8 +284,7 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
     TokenizerEncodeResult *results = NULL;
     int ret;
 
-    ret = ff_dnn_create_tokenizer_and_encode_batch(
-        tokenizer_path, labels, label_count, &results, ctx);
+    ret = ff_dnn_create_tokenizer_and_encode_batch(tokenizer_path, labels, label_count, &results, ctx);
 
     if (ret < 0) {
         av_log(ctx, AV_LOG_ERROR, "Failed to tokenize batch text\n");
@@ -308,10 +295,8 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
 
     // Create the tensors directly with the final batch dimensions
     // Shape: [batch_size, token_dimension]
-    auto tokenized_text = torch::zeros({label_count, token_dimension}, 
-            torch::TensorOptions().dtype(torch::kInt64));
-    auto attention_mask = torch::zeros({label_count, token_dimension}, 
-            torch::TensorOptions().dtype(torch::kInt64));
+    auto tokenized_text = torch::zeros({label_count, token_dimension}, torch::TensorOptions().dtype(torch::kInt64));
+    auto attention_mask = torch::zeros({label_count, token_dimension}, torch::TensorOptions().dtype(torch::kInt64));
 
     // Get accessors for direct, efficient memory access
     auto tokens_accessor = tokenized_text.accessor<int64_t, 2>();
@@ -331,10 +316,10 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
     clxp_ctx->tokenized_text = new torch::Tensor(tokenized_text);
     clxp_ctx->attention_mask = new torch::Tensor(attention_mask);
 
-    if(clxp_ctx->tokenized_text->device() != device){
+    if (clxp_ctx->tokenized_text->device() != device) {
         *clxp_ctx->tokenized_text = clxp_ctx->tokenized_text->to(device);
     }
-    if(clxp_ctx->attention_mask->device() != device){
+    if (clxp_ctx->attention_mask->device() != device) {
         *clxp_ctx->attention_mask = clxp_ctx->attention_mask->to(device);
     }
 
@@ -346,15 +331,12 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
 static int copy_softmax_units(THModel *th_model, const int *softmax_units, int softmax_units_count)
 {
     if (softmax_units && softmax_units_count > 0) {
-        th_model->clxp_ctx->softmax_units =
-            (int *)av_malloc_array(softmax_units_count, sizeof(int));
+        th_model->clxp_ctx->softmax_units = (int *)av_malloc_array(softmax_units_count, sizeof(int));
         if (!th_model->clxp_ctx->softmax_units) {
-            av_log(th_model->ctx, AV_LOG_ERROR,
-                   "Failed to allocate memory for softmax units\n");
+            av_log(th_model->ctx, AV_LOG_ERROR, "Failed to allocate memory for softmax units\n");
             return AVERROR(ENOMEM);
         }
-        memcpy(th_model->clxp_ctx->softmax_units, softmax_units,
-               softmax_units_count * sizeof(int));
+        memcpy(th_model->clxp_ctx->softmax_units, softmax_units, softmax_units_count * sizeof(int));
         th_model->clxp_ctx->softmax_units_count = softmax_units_count;
     } else {
         th_model->clxp_ctx->softmax_units = NULL;
@@ -363,9 +345,10 @@ static int copy_softmax_units(THModel *th_model, const int *softmax_units, int s
     return 0;
 }
 
-static int test_clip_inference(THModel *th_model, const c10::Device &device){
+static int test_clip_inference(THModel *th_model, const c10::Device &device)
+{
     // Try given resolution
-    if(th_model->ctx->torch_option.input_resolution >= 0){
+    if (th_model->ctx->torch_option.input_resolution >= 0) {
         try {
             torch::Tensor test_input = torch::zeros(th_model->ctx->torch_option.input_resolution);
             if (test_input.device() != device) {
@@ -376,8 +359,8 @@ static int test_clip_inference(THModel *th_model, const c10::Device &device){
             inputs.push_back(*th_model->clxp_ctx->tokenized_text);
             auto output = th_model->jit_model->forward(inputs);
         } catch (const std::exception &e) {
-            av_log(th_model->ctx, AV_LOG_ERROR,
-                    "CLIP Input Resolution %ld did not work\n", th_model->ctx->torch_option.input_resolution);
+            av_log(th_model->ctx, AV_LOG_ERROR, "CLIP Input Resolution %ld did not work\n",
+                   th_model->ctx->torch_option.input_resolution);
             return AVERROR(EINVAL);
         }
         return 0;
@@ -405,8 +388,7 @@ static int test_clip_inference(THModel *th_model, const c10::Device &device){
             inputs.push_back(*th_model->clxp_ctx->tokenized_text);
             auto output = th_model->jit_model->forward(inputs);
         } catch (const std::exception &e) {
-            av_log(th_model->ctx, AV_LOG_WARNING,
-                    "CLIP Input Resolution %ld did not work\n", dims[2]);
+            av_log(th_model->ctx, AV_LOG_WARNING, "CLIP Input Resolution %ld did not work\n", dims[2]);
             continue;
         }
         resolution = dims[2];
@@ -414,19 +396,18 @@ static int test_clip_inference(THModel *th_model, const c10::Device &device){
         break;
     }
     if (!found_dims || resolution <= 0) {
-        av_log(th_model->ctx, AV_LOG_ERROR,
-            "Failed to determine input resolution for CLIP model\n");
+        av_log(th_model->ctx, AV_LOG_ERROR, "Failed to determine input resolution for CLIP model\n");
         return AVERROR(EINVAL);
     }
     // Log the resolution chosen for the CLIP model
-    av_log(th_model->ctx, AV_LOG_INFO, 
-        "Using input resolution %ldx%ld for CLIP model\n", 
-        resolution, resolution);
+    av_log(th_model->ctx, AV_LOG_INFO, "Using input resolution %ldx%ld for CLIP model\n", resolution, resolution);
     th_model->ctx->torch_option.input_resolution = resolution;
     return 0;
 }
 
-static int test_clap_inference(THModel *th_model, int64_t sample_rate, int64_t sample_duration, const c10::Device &device){
+static int test_clap_inference(THModel *th_model, int64_t sample_rate, int64_t sample_duration,
+                               const c10::Device &device)
+{
     try {
         // Create dummy audio tensor to test model compatibility
         int target_samples = sample_rate * sample_duration;
@@ -445,71 +426,59 @@ static int test_clap_inference(THModel *th_model, int64_t sample_rate, int64_t s
 
         auto audio_features = th_model->jit_model->forward(inputs);
     } catch (const c10::Error &e) {
-        av_log(th_model->ctx, AV_LOG_ERROR,
-                "Error during CLIP model initialization: %s\n", e.what());
+        av_log(th_model->ctx, AV_LOG_ERROR, "Error during CLIP model initialization: %s\n", e.what());
         return AVERROR(EINVAL);
     } catch (const std::exception &e) {
-        av_log(th_model->ctx, AV_LOG_ERROR,
-                "Error during CLAP model inference testing\n");
+        av_log(th_model->ctx, AV_LOG_ERROR, "Error during CLAP model inference testing\n");
         return AVERROR(EINVAL);
     }
     return 0;
 }
 
-static int init_clxp_model(THModel *th_model, DNNFunctionType func_type,
-                           const char **labels, int label_count,
-                           const char *tokenizer_path,
-                           const AVFilterContext *filter_ctx)
+static int init_clxp_model(THModel *th_model, DNNFunctionType func_type, const char **labels, int label_count,
+                           const char *tokenizer_path, const AVFilterContext *filter_ctx)
 {
     c10::Device device = (*th_model->jit_model->parameters().begin()).device();
     th_model->clxp_ctx = (THClxpContext *)av_mallocz(sizeof(THClxpContext));
     if (!th_model->clxp_ctx) {
-        av_log(th_model->ctx, AV_LOG_ERROR,
-               "Failed to allocate memory for CLIP context\n");
+        av_log(th_model->ctx, AV_LOG_ERROR, "Failed to allocate memory for CLIP context\n");
         return AVERROR(ENOMEM);
     }
 
-    int ret = get_tokenized_batch(th_model->clxp_ctx, labels, label_count,
-                                  tokenizer_path, th_model->ctx, device);
+    int ret = get_tokenized_batch(th_model->clxp_ctx, labels, label_count, tokenizer_path, th_model->ctx, device);
     if (ret < 0) {
-        av_log(th_model->ctx, AV_LOG_ERROR,
-               "Failed to tokenize batch text for CLIP model\n");
+        av_log(th_model->ctx, AV_LOG_ERROR, "Failed to tokenize batch text for CLIP model\n");
         return ret;
     }
     return 0;
 }
 #endif
 
-static torch::Tensor calculate_similarity(torch::Tensor &tensor1,
-                                          torch::Tensor &tensor2,
-                                          bool normalize, float logit_scale,
-                                          DnnContext *ctx)
+static torch::Tensor calculate_similarity(torch::Tensor &tensor1, torch::Tensor &tensor2, bool normalize,
+                                          float logit_scale, DnnContext *ctx)
 {
     try {
         if (normalize) {
-            tensor1 = torch::nn::functional::normalize(
-                tensor1, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
+            tensor1 =
+                torch::nn::functional::normalize(tensor1, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
 
-            tensor2 = torch::nn::functional::normalize(
-                tensor2, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
+            tensor2 =
+                torch::nn::functional::normalize(tensor2, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
         }
 
         // Compute similarity matrix
-        torch::Tensor similarity =
-            logit_scale * torch::matmul(tensor2, tensor1.transpose(0, 1));
+        torch::Tensor similarity = logit_scale * torch::matmul(tensor2, tensor1.transpose(0, 1));
         return similarity.transpose(0, 1);
     } catch (const c10::Error &e) {
         if (ctx) {
-            av_log(ctx, AV_LOG_ERROR, "Similarity computation failed: %s\n",
-                   e.what());
+            av_log(ctx, AV_LOG_ERROR, "Similarity computation failed: %s\n", e.what());
         }
         return torch::Tensor(); // Return empty tensor properly
     }
 }
 
-static torch::Tensor apply_softmax(torch::Tensor input_tensor,
-                                   const int *softmax_units,
-                                   int softmax_units_count, DnnContext *ctx)
+static torch::Tensor apply_softmax(torch::Tensor input_tensor, const int *softmax_units, int softmax_units_count,
+                                   DnnContext *ctx)
 {
     try {
         // Check for empty or invalid input tensor
@@ -520,8 +489,7 @@ static torch::Tensor apply_softmax(torch::Tensor input_tensor,
 
         // If no specific units are provided, apply softmax to the entire tensor
         if (!softmax_units || softmax_units_count <= 0) {
-            return torch::nn::functional::softmax(
-                input_tensor, torch::nn::functional::SoftmaxFuncOptions(1));
+            return torch::nn::functional::softmax(input_tensor, torch::nn::functional::SoftmaxFuncOptions(1));
         }
 
         torch::Tensor result = input_tensor.clone();
@@ -538,8 +506,8 @@ static torch::Tensor apply_softmax(torch::Tensor input_tensor,
             torch::Tensor segment = result.slice(1, offset, offset + length);
 
             // Apply softmax along dimension 1 (across labels in segment)
-            torch::Tensor softmax_segment = torch::nn::functional::softmax(
-                segment, torch::nn::functional::SoftmaxFuncOptions(1));
+            torch::Tensor softmax_segment =
+                torch::nn::functional::softmax(segment, torch::nn::functional::SoftmaxFuncOptions(1));
 
             // Put softmaxed segment back into result tensor
             result.slice(1, offset, offset + length) = softmax_segment;
@@ -556,8 +524,7 @@ static torch::Tensor apply_softmax(torch::Tensor input_tensor,
     }
 }
 
-static torch::Tensor handle_short_audio_tensor(torch::Tensor audio_tensor,
-                                               int target_samples)
+static torch::Tensor handle_short_audio_tensor(torch::Tensor audio_tensor, int target_samples)
 {
     int nb_samples = audio_tensor.size(0);
     int repeat_factor = (target_samples + nb_samples - 1) / nb_samples;
@@ -569,18 +536,14 @@ static torch::Tensor handle_short_audio_tensor(torch::Tensor audio_tensor,
     return repeated.slice(0, 0, target_samples);
 }
 
-static torch::Tensor handle_long_audio_tensor(torch::Tensor audio_tensor,
-                                              int target_samples,
-                                              TaskItem *task)
+static torch::Tensor handle_long_audio_tensor(torch::Tensor audio_tensor, int target_samples, TaskItem *task)
 {
     int nb_samples = audio_tensor.size(0);
     int max_start = nb_samples - target_samples;
 
     // Use a deterministic seed based on frame properties
     unsigned int seed =
-        (unsigned int)((uintptr_t)task ^
-                       (uintptr_t)(task->in_frame->pts ? task->in_frame->pts
-                                                       : nb_samples));
+        (unsigned int)((uintptr_t)task ^ (uintptr_t)(task->in_frame->pts ? task->in_frame->pts : nb_samples));
 
     // Determine start position - center-biased for better representation
     int start_idx;
@@ -597,8 +560,7 @@ static torch::Tensor handle_long_audio_tensor(torch::Tensor audio_tensor,
     return audio_tensor.slice(0, start_idx, start_idx + target_samples);
 }
 
-static int prepare_audio_tensor(const THModel *th_model,
-                                const THRequestItem *request)
+static int prepare_audio_tensor(const THModel *th_model, const THRequestItem *request)
 {
     THInferRequest *infer_request = request->infer_request;
     LastLevelTaskItem *lltask = request->lltasks[0];
@@ -620,24 +582,20 @@ static int prepare_audio_tensor(const THModel *th_model,
 
     // Validate audio parameters
     if (task->in_frame->sample_rate != th_model->ctx->torch_option.sample_rate) {
-        av_log(ctx, AV_LOG_ERROR,
-               "Sample rate mismatch. Expected %ld Hz, got %d Hz\n",
+        av_log(ctx, AV_LOG_ERROR, "Sample rate mismatch. Expected %ld Hz, got %d Hz\n",
                th_model->ctx->torch_option.sample_rate, task->in_frame->sample_rate);
         return AVERROR(EINVAL);
     }
 
     if (task->in_frame->format != AV_SAMPLE_FMT_FLT) {
-        av_log(ctx, AV_LOG_ERROR,
-               "Unsupported sample format. Expected float\n");
+        av_log(ctx, AV_LOG_ERROR, "Unsupported sample format. Expected float\n");
         return AVERROR(EINVAL);
     }
 
     try {
-        torch::Tensor audio_tensor =
-            torch::from_blob(audio_data, {nb_samples}, torch::kFloat32).clone();
+        torch::Tensor audio_tensor = torch::from_blob(audio_data, {nb_samples}, torch::kFloat32).clone();
 
-        c10::Device device =
-            (*th_model->jit_model->parameters().begin()).device();
+        c10::Device device = (*th_model->jit_model->parameters().begin()).device();
         if (audio_tensor.device() != device) {
             audio_tensor = audio_tensor.to(device);
         }
@@ -647,12 +605,10 @@ static int prepare_audio_tensor(const THModel *th_model,
 
         if (nb_samples < target_samples) {
             // Handle short audio using tensor repeat operation
-            processed_tensor =
-                handle_short_audio_tensor(audio_tensor, target_samples);
+            processed_tensor = handle_short_audio_tensor(audio_tensor, target_samples);
         } else if (nb_samples > target_samples) {
             // Handle long audio using tensor slice operation
-            processed_tensor =
-                handle_long_audio_tensor(audio_tensor, target_samples, task);
+            processed_tensor = handle_long_audio_tensor(audio_tensor, target_samples, task);
         } else {
             // Exact length, just use the tensor as is
             processed_tensor = audio_tensor;
@@ -663,17 +619,14 @@ static int prepare_audio_tensor(const THModel *th_model,
         // Assign to output
         *infer_request->input_tensor = processed_tensor;
     } catch (const c10::Error &e) {
-        av_log(ctx, AV_LOG_ERROR, "Audio tensor processing failed: %s\n",
-               e.what());
+        av_log(ctx, AV_LOG_ERROR, "Audio tensor processing failed: %s\n", e.what());
         return AVERROR(EINVAL);
     }
 
     return ret;
 }
 
-static int preprocess_image_tensor(const THModel *th_model,
-                                   torch::Tensor *input_tensor,
-                                   const c10::Device &device)
+static int preprocess_image_tensor(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device &device)
 {
     DnnContext *ctx = th_model->ctx;
     try {
@@ -714,8 +667,7 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     infer_request->output = new torch::Tensor();
 
     if (th_model->model.func_type == DFT_ANALYTICS_CLAP) {
-        lltask =
-            (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
+        lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
         if (!lltask) {
             return -1;
         }
@@ -725,8 +677,7 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
     }
 
     while (ff_queue_size(th_model->lltask_queue) != 0) {
-        lltask =
-            (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
+        lltask = (LastLevelTaskItem *)ff_queue_pop_front(th_model->lltask_queue);
         if (!lltask) {
             break;
         }
@@ -735,37 +686,33 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
 
         input.dims[height_idx] = task->in_frame->height;
         input.dims[width_idx] = task->in_frame->width;
-        input.data = av_malloc(input.dims[height_idx] * input.dims[width_idx] *
-                               input.dims[channel_idx] * sizeof(float));
+        input.data =
+            av_malloc(input.dims[height_idx] * input.dims[width_idx] * input.dims[channel_idx] * sizeof(float));
         if (!input.data) {
             ret = AVERROR(ENOMEM);
             goto err;
         }
         switch (th_model->model.func_type) {
-        case DFT_PROCESS_FRAME:
-        case DFT_ANALYTICS_CLIP:
-            input.scale = 255;
-            if (task->do_ioproc) {
-                if (th_model->model.frame_pre_proc != NULL) {
-                    th_model->model.frame_pre_proc(task->in_frame, &input,
-                                                   th_model->model.filter_ctx);
-                } else {
-                    ff_proc_from_frame_to_dnn(task->in_frame, &input, ctx);
+            case DFT_PROCESS_FRAME:
+            case DFT_ANALYTICS_CLIP:
+                input.scale = 255;
+                if (task->do_ioproc) {
+                    if (th_model->model.frame_pre_proc != NULL) {
+                        th_model->model.frame_pre_proc(task->in_frame, &input, th_model->model.filter_ctx);
+                    } else {
+                        ff_proc_from_frame_to_dnn(task->in_frame, &input, ctx);
+                    }
                 }
-            }
-            break;
-        default:
-            avpriv_report_missing_feature(NULL, "model function type %d",
-                                          th_model->model.func_type);
-            ret = AVERROR(EINVAL);
-            goto err;
+                break;
+            default:
+                avpriv_report_missing_feature(NULL, "model function type %d", th_model->model.func_type);
+                ret = AVERROR(EINVAL);
+                goto err;
         }
 
         try {
             auto tensor = torch::from_blob(input.data,
-                                           {1, input.dims[channel_idx],
-                                            input.dims[height_idx],
-                                            input.dims[width_idx]},
+                                           {1, input.dims[channel_idx], input.dims[height_idx], input.dims[width_idx]},
                                            deleter, torch::kFloat32)
                               .clone();
             if (th_model->model.func_type == DFT_ANALYTICS_CLIP) {
@@ -792,8 +739,7 @@ static int fill_model_input_th(THModel *th_model, THRequestItem *request)
             goto err;
         }
     } catch (const c10::Error &e) {
-        av_log(ctx, AV_LOG_ERROR, "Error creating batch tensor: %s\n",
-               e.what());
+        av_log(ctx, AV_LOG_ERROR, "Error creating batch tensor: %s\n", e.what());
         ret = AVERROR(EINVAL);
         goto err;
     }
@@ -857,29 +803,28 @@ static int th_start_inference(void *args)
 
     if (th_model->model.func_type == DFT_PROCESS_FRAME) {
         *infer_request->output = result.toTensor();
-    } else if (th_model->model.func_type == DFT_ANALYTICS_CLIP ||
-               th_model->model.func_type == DFT_ANALYTICS_CLAP) {
+    } else if (th_model->model.func_type == DFT_ANALYTICS_CLIP || th_model->model.func_type == DFT_ANALYTICS_CLAP) {
         if (result.isTuple()) {
             auto result_tuple = result.toTuple();
             torch::Tensor media_embeddings;
             torch::Tensor text_embeddings;
             float logit_scale = th_model->ctx->torch_option.logit_scale;
-            if(th_model->ctx->torch_option.forward_order == 1){
+            if (th_model->ctx->torch_option.forward_order == 1) {
                 media_embeddings = result_tuple->elements()[1].toTensor();
                 text_embeddings = result_tuple->elements()[0].toTensor();
-                *infer_request->output = calculate_similarity(media_embeddings, text_embeddings, th_model->ctx->torch_option.normalize, logit_scale, ctx);
+                *infer_request->output = calculate_similarity(media_embeddings, text_embeddings,
+                                                              th_model->ctx->torch_option.normalize, logit_scale, ctx);
             } else {
                 media_embeddings = result_tuple->elements()[0].toTensor();
                 text_embeddings = result_tuple->elements()[1].toTensor();
-                *infer_request->output = calculate_similarity(media_embeddings, text_embeddings, th_model->ctx->torch_option.normalize, logit_scale, ctx);
+                *infer_request->output = calculate_similarity(media_embeddings, text_embeddings,
+                                                              th_model->ctx->torch_option.normalize, logit_scale, ctx);
             }
-            *infer_request->output = apply_softmax(
-                *infer_request->output, th_model->clxp_ctx->softmax_units,
-                th_model->clxp_ctx->softmax_units_count, ctx);
+            *infer_request->output = apply_softmax(*infer_request->output, th_model->clxp_ctx->softmax_units,
+                                                   th_model->clxp_ctx->softmax_units_count, ctx);
         }
     } else {
-        avpriv_report_missing_feature(ctx, "model function type %d",
-                                      th_model->model.func_type);
+        avpriv_report_missing_feature(ctx, "model function type %d", th_model->model.func_type);
         return AVERROR(EINVAL);
     }
 
@@ -900,12 +845,10 @@ static void infer_completion_callback(void *args)
     outputs.order = DCO_RGB;
     outputs.layout = DL_NCHW;
     outputs.dt = DNN_FLOAT;
-    if (th_model->model.func_type == DFT_ANALYTICS_CLIP ||
-        th_model->model.func_type == DFT_ANALYTICS_CLAP) {
+    if (th_model->model.func_type == DFT_ANALYTICS_CLIP || th_model->model.func_type == DFT_ANALYTICS_CLAP) {
         // CLIP outputs are similarity scores [batch_size, num_labels]
         if (sizes.size() != 2) {
-            av_log(th_model->ctx, AV_LOG_ERROR,
-                   "Invalid CLIP output dimensions\n");
+            av_log(th_model->ctx, AV_LOG_ERROR, "Invalid CLIP output dimensions\n");
             goto err;
         }
         outputs.dims[0] = sizes[0]; // batch_size
@@ -914,8 +857,7 @@ static void infer_completion_callback(void *args)
                             ? DCO_RGB
                             : DCO_NONE; // doesn't matter for similarity scores
         outputs.dt = DNN_FLOAT;
-    } else if (sizes.size() == 4 &&
-               th_model->model.func_type == DFT_PROCESS_FRAME) {
+    } else if (sizes.size() == 4 && th_model->model.func_type == DFT_PROCESS_FRAME) {
         // 4 dimensions: [batch_size, channel, height, width]
         // this format of data is normally used for video frame SR
         outputs.dims[0] = sizes.at(0); // N
@@ -923,8 +865,7 @@ static void infer_completion_callback(void *args)
         outputs.dims[2] = sizes.at(2); // H
         outputs.dims[3] = sizes.at(3); // W
     } else {
-        avpriv_report_missing_feature(th_model->ctx,
-                                      "Support of this kind of model");
+        avpriv_report_missing_feature(th_model->ctx, "Support of this kind of model");
         goto err;
     }
 
@@ -945,49 +886,40 @@ static void infer_completion_callback(void *args)
 
             outputs.data = single_output.data_ptr();
         } catch (const c10::Error &e) {
-            av_log(th_model->ctx, AV_LOG_ERROR,
-                   "Error processing output tensor: %s\n", e.what());
+            av_log(th_model->ctx, AV_LOG_ERROR, "Error processing output tensor: %s\n", e.what());
             goto err;
         }
 
         switch (th_model->model.func_type) {
-        case DFT_PROCESS_FRAME:
-            if (task->do_ioproc) {
-                outputs.scale = 255;
-                if (th_model->model.frame_post_proc != NULL) {
-                    th_model->model.frame_post_proc(task->out_frame, &outputs,
-                                                    th_model->model.filter_ctx);
+            case DFT_PROCESS_FRAME:
+                if (task->do_ioproc) {
+                    outputs.scale = 255;
+                    if (th_model->model.frame_post_proc != NULL) {
+                        th_model->model.frame_post_proc(task->out_frame, &outputs, th_model->model.filter_ctx);
+                    } else {
+                        ff_proc_from_dnn_to_frame(task->out_frame, &outputs, th_model->ctx);
+                    }
                 } else {
-                    ff_proc_from_dnn_to_frame(task->out_frame, &outputs,
-                                              th_model->ctx);
+                    task->out_frame->width = outputs.dims[dnn_get_width_idx_by_layout(outputs.layout)];
+                    task->out_frame->height = outputs.dims[dnn_get_height_idx_by_layout(outputs.layout)];
                 }
-            } else {
-                task->out_frame->width =
-                    outputs.dims[dnn_get_width_idx_by_layout(outputs.layout)];
-                task->out_frame->height =
-                    outputs.dims[dnn_get_height_idx_by_layout(outputs.layout)];
-            }
-            break;
+                break;
 #if (CONFIG_LIBTOKENIZERS == 1)
-        case DFT_ANALYTICS_CLIP:
-        case DFT_ANALYTICS_CLAP:
-            if (task->do_ioproc) {
-                if (!th_model->model.classify_post_proc) {
-                    av_log(th_model->ctx, AV_LOG_ERROR,
-                           "CLIP filter needs to provide post proc\n");
-                    goto err;
+            case DFT_ANALYTICS_CLIP:
+            case DFT_ANALYTICS_CLAP:
+                if (task->do_ioproc) {
+                    if (!th_model->model.classify_post_proc) {
+                        av_log(th_model->ctx, AV_LOG_ERROR, "CLIP filter needs to provide post proc\n");
+                        goto err;
+                    }
+                    th_model->model.classify_post_proc(task->in_frame, &outputs, lltask->bbox_index,
+                                                       th_model->model.filter_ctx);
                 }
-                th_model->model.classify_post_proc(task->in_frame, &outputs,
-                                                   lltask->bbox_index,
-                                                   th_model->model.filter_ctx);
-            }
-            break;
+                break;
 #endif
-        default:
-            avpriv_report_missing_feature(th_model->ctx,
-                                          "model function type %d",
-                                          th_model->model.func_type);
-            goto err;
+            default:
+                avpriv_report_missing_feature(th_model->ctx, "model function type %d", th_model->model.func_type);
+                goto err;
         }
         task->inference_done++;
         av_freep(&request->lltasks[i]);
@@ -998,8 +930,7 @@ err:
 
     if (ff_safe_queue_push_back(th_model->request_queue, request) < 0) {
         destroy_request_item(&request);
-        av_log(th_model->ctx, AV_LOG_ERROR,
-               "Unable to push back request_queue\n");
+        av_log(th_model->ctx, AV_LOG_ERROR, "Unable to push back request_queue\n");
     }
 }
 
@@ -1036,9 +967,7 @@ static int execute_model_th(THRequestItem *request, Queue *lltask_queue)
             goto err;
         }
         infer_completion_callback(request);
-        return (task->inference_done == task->inference_todo)
-                   ? 0
-                   : DNN_GENERIC_ERROR;
+        return (task->inference_done == task->inference_todo) ? 0 : DNN_GENERIC_ERROR;
     }
 
 err:
@@ -1049,10 +978,8 @@ err:
     return ret;
 }
 
-static int get_output_th(DNNModel *model, const char *input_name,
-                         int input_width, int input_height,
-                         const char *output_name, int *output_width,
-                         int *output_height)
+static int get_output_th(DNNModel *model, const char *input_name, int input_width, int input_height,
+                         const char *output_name, int *output_width, int *output_height)
 {
     int ret = 0;
     THModel *th_model = (THModel *)model;
@@ -1066,17 +993,14 @@ static int get_output_th(DNNModel *model, const char *input_name,
         .in_frame = NULL,
         .out_frame = NULL,
     };
-    ret = ff_dnn_fill_gettingoutput_task(&task, &exec_params, th_model,
-                                         input_height, input_width, ctx);
+    ret = ff_dnn_fill_gettingoutput_task(&task, &exec_params, th_model, input_height, input_width, ctx);
     if (ret != 0) {
         goto err;
     }
 
-    ret = extract_lltask_from_task(th_model->model.func_type, &task,
-                                   th_model->lltask_queue, NULL);
+    ret = extract_lltask_from_task(th_model->model.func_type, &task, th_model->lltask_queue, NULL);
     if (ret != 0) {
-        av_log(ctx, AV_LOG_ERROR,
-               "unable to extract last level task from task.\n");
+        av_log(ctx, AV_LOG_ERROR, "unable to extract last level task from task.\n");
         goto err;
     }
 
@@ -1099,8 +1023,7 @@ err:
 
 static THInferRequest *th_create_inference_request(void)
 {
-    THInferRequest *request =
-        (THInferRequest *)av_malloc(sizeof(THInferRequest));
+    THInferRequest *request = (THInferRequest *)av_malloc(sizeof(THInferRequest));
     if (!request) {
         return NULL;
     }
@@ -1109,8 +1032,7 @@ static THInferRequest *th_create_inference_request(void)
     return request;
 }
 
-static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type,
-                              AVFilterContext *filter_ctx)
+static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
 {
     DNNModel *model = NULL;
     THModel *th_model = NULL;
@@ -1123,31 +1045,25 @@ static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type,
     model = &th_model->model;
     th_model->ctx = ctx;
 
-    if(ctx->torch_option.forward_order < 0){
-        //set default value for forward_order
+    if (ctx->torch_option.forward_order < 0) {
+        // set default value for forward_order
         ctx->torch_option.forward_order = func_type == DFT_ANALYTICS_CLAP ? 1 : 0;
         // Log the default value for forward_order
-        av_log(ctx, AV_LOG_INFO,
-            "Using default forward_order=%d for %s input\n",
-            ctx->torch_option.forward_order,
-            func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
+        av_log(ctx, AV_LOG_INFO, "Using default forward_order=%d for %s input\n", ctx->torch_option.forward_order,
+               func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
     }
-    if(ctx->torch_option.logit_scale <= 0){
-        //set default value for logit_scale
+    if (ctx->torch_option.logit_scale <= 0) {
+        // set default value for logit_scale
         ctx->torch_option.logit_scale = func_type == DFT_ANALYTICS_CLAP ? 33.37 : 4.6052;
         // Log the default value for logit_scale
-        av_log(ctx, AV_LOG_INFO,
-            "Using default logit_scale=%.4f for %s input\n",
-            ctx->torch_option.logit_scale,
-            func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
+        av_log(ctx, AV_LOG_INFO, "Using default logit_scale=%.4f for %s input\n", ctx->torch_option.logit_scale,
+               func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
     }
-    if(ctx->torch_option.normalize < 0){
+    if (ctx->torch_option.normalize < 0) {
         ctx->torch_option.normalize = func_type == DFT_ANALYTICS_CLAP ? 1 : 0;
         // Log the default value for logit_scale
-        av_log(ctx, AV_LOG_INFO,
-            "Using default normalize=%d for %s input\n",
-            ctx->torch_option.normalize,
-            func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
+        av_log(ctx, AV_LOG_INFO, "Using default normalize=%d for %s input\n", ctx->torch_option.normalize,
+               func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
     }
 
     c10::Device device = c10::Device(device_name);
@@ -1171,25 +1087,20 @@ static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type,
                 char *endptr = NULL;
                 device_idx = strtol(device_num + 1, &endptr, 10);
                 if (*endptr != '\0' && !isspace(*endptr)) {
-                    av_log(ctx, AV_LOG_ERROR,
-                           "Invalid device number format: %s\n",
-                           device_num + 1);
+                    av_log(ctx, AV_LOG_ERROR, "Invalid device number format: %s\n", device_num + 1);
                     goto fail;
                 }
             }
             if (device_idx >= static_cast<int>(torch::cuda::device_count())) {
-                av_log(
-                    ctx, AV_LOG_ERROR,
-                    "Requested CUDA device %d but only %ld devices available\n",
-                    device_idx, torch::cuda::device_count());
+                av_log(ctx, AV_LOG_ERROR, "Requested CUDA device %d but only %ld devices available\n", device_idx,
+                       torch::cuda::device_count());
                 goto fail;
             }
             c10::cuda::set_device(device_idx);
             c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
             torch::cuda::synchronize();
         } catch (const c10::Error &e) {
-            av_log(ctx, AV_LOG_ERROR, "CUDA initialization failed: %s\n",
-                   e.what());
+            av_log(ctx, AV_LOG_ERROR, "CUDA initialization failed: %s\n", e.what());
             goto fail;
         }
 #endif
@@ -1219,8 +1130,7 @@ static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type,
     item->lltasks = NULL;
     item->infer_request = th_create_inference_request();
     if (!item->infer_request) {
-        av_log(NULL, AV_LOG_ERROR,
-               "Failed to allocate memory for Torch inference request\n");
+        av_log(NULL, AV_LOG_ERROR, "Failed to allocate memory for Torch inference request\n");
         goto fail;
     }
     item->exec_module.start_inference = &th_start_inference;
@@ -1257,8 +1167,7 @@ fail:
     return NULL;
 }
 
-static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type,
-                                   AVFilterContext *filter_ctx)
+static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
 {
     THModel *th_model = init_model_th(ctx, func_type, filter_ctx);
     if (!th_model) {
@@ -1267,10 +1176,9 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type,
     return &th_model->model;
 }
 
-static DNNModel *dnn_load_model_with_tokenizer_th(
-    DnnContext *ctx, DNNFunctionType func_type, const char **labels,int label_count,
-     int *softmax_units, int softmax_units_count,
-     const char *tokenizer_path, AVFilterContext *filter_ctx)
+static DNNModel *dnn_load_model_with_tokenizer_th(DnnContext *ctx, DNNFunctionType func_type, const char **labels,
+                                                  int label_count, int *softmax_units, int softmax_units_count,
+                                                  const char *tokenizer_path, AVFilterContext *filter_ctx)
 {
     int ret;
     THModel *th_model = init_model_th(ctx, func_type, filter_ctx);
@@ -1281,8 +1189,7 @@ static DNNModel *dnn_load_model_with_tokenizer_th(
     // Check if this is a CLXP model and initialize accordingly
     auto model = &th_model->model;
     if ((func_type == DFT_ANALYTICS_CLIP || func_type == DFT_ANALYTICS_CLAP)) {
-        ret = init_clxp_model(th_model, func_type, labels, label_count,
-            tokenizer_path,filter_ctx);
+        ret = init_clxp_model(th_model, func_type, labels, label_count, tokenizer_path, filter_ctx);
         if (ret < 0) {
             av_log(ctx, AV_LOG_ERROR, "Failed to initialize CLXP model\n");
             dnn_free_model_th(&model);
@@ -1297,16 +1204,16 @@ static DNNModel *dnn_load_model_with_tokenizer_th(
     }
     c10::Device device = (*th_model->jit_model->parameters().begin()).device();
 
-    if(func_type == DFT_ANALYTICS_CLIP) {
-        ret = test_clip_inference(th_model,device);
+    if (func_type == DFT_ANALYTICS_CLIP) {
+        ret = test_clip_inference(th_model, device);
         if (ret < 0) {
             av_log(ctx, AV_LOG_ERROR, "Failed to test CLIP inference\n");
             dnn_free_model_th(&model);
             return NULL;
         }
-    }
-    else if(func_type == DFT_ANALYTICS_CLAP){
-        ret = test_clap_inference(th_model, th_model->ctx->torch_option.sample_rate, th_model->ctx->torch_option.sample_duration,device);
+    } else if (func_type == DFT_ANALYTICS_CLAP) {
+        ret = test_clap_inference(th_model, th_model->ctx->torch_option.sample_rate,
+                                  th_model->ctx->torch_option.sample_duration, device);
         if (ret < 0) {
             av_log(ctx, AV_LOG_ERROR, "Failed to test CLAP inference\n");
             dnn_free_model_th(&model);
@@ -1317,8 +1224,7 @@ static DNNModel *dnn_load_model_with_tokenizer_th(
     return &th_model->model;
 }
 
-static int dnn_execute_model_th(const DNNModel *model,
-                                DNNExecBaseParams *exec_params)
+static int dnn_execute_model_th(const DNNModel *model, DNNExecBaseParams *exec_params)
 {
     THModel *th_model = (THModel *)model;
     DnnContext *ctx = th_model->ctx;
@@ -1352,11 +1258,9 @@ static int dnn_execute_model_th(const DNNModel *model,
         return ret;
     }
 
-    ret = extract_lltask_from_task(model->func_type, task,
-                                   th_model->lltask_queue, exec_params);
+    ret = extract_lltask_from_task(model->func_type, task, th_model->lltask_queue, exec_params);
     if (ret != 0) {
-        av_log(ctx, AV_LOG_ERROR,
-               "unable to extract last level task from task.\n");
+        av_log(ctx, AV_LOG_ERROR, "unable to extract last level task from task.\n");
         return ret;
     }
 
@@ -1370,8 +1274,7 @@ static int dnn_execute_model_th(const DNNModel *model,
         return AVERROR(EINVAL);
     }
 
-    request->lltasks = (LastLevelTaskItem **)av_malloc_array(
-        task->inference_todo, sizeof(*request->lltasks));
+    request->lltasks = (LastLevelTaskItem **)av_malloc_array(task->inference_todo, sizeof(*request->lltasks));
     if (!request->lltasks) {
         av_log(ctx, AV_LOG_ERROR, "unable to create lltasks.\n");
         return AVERROR(EINVAL);
@@ -1381,8 +1284,7 @@ static int dnn_execute_model_th(const DNNModel *model,
     return execute_model_th(request, th_model->lltask_queue);
 }
 
-static DNNAsyncStatusType dnn_get_result_th(const DNNModel *model, AVFrame **in,
-                                            AVFrame **out)
+static DNNAsyncStatusType dnn_get_result_th(const DNNModel *model, AVFrame **in, AVFrame **out)
 {
     THModel *th_model = (THModel *)model;
     return ff_dnn_get_result_common(th_model->task_queue, in, out);
@@ -1406,14 +1308,13 @@ static int dnn_flush_th(const DNNModel *model)
     return execute_model_th(request, th_model->lltask_queue);
 }
 
-
 extern const DNNModule ff_dnn_backend_torch = {
-    .clazz          = DNN_DEFINE_CLASS(dnn_th),
-    .type           = DNN_TH,
-    .load_model     = dnn_load_model_th,
+    .clazz = DNN_DEFINE_CLASS(dnn_th),
+    .type = DNN_TH,
+    .load_model = dnn_load_model_th,
     .load_model_with_tokenizer = dnn_load_model_with_tokenizer_th,
-    .execute_model  = dnn_execute_model_th,
-    .get_result     = dnn_get_result_th,
-    .flush          = dnn_flush_th,
-    .free_model     = dnn_free_model_th,
+    .execute_model = dnn_execute_model_th,
+    .get_result = dnn_get_result_th,
+    .flush = dnn_flush_th,
+    .free_model = dnn_free_model_th,
 };
