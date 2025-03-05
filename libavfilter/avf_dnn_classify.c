@@ -85,7 +85,9 @@ typedef struct DnnClassifyContext {
                     AV_OPT_TYPE_BOOL, {.i64 = -1}, -1, 1, FLAGS},
             {"normalize", "Normalize the input tensor (CLIP/CLAP only)", OFFSET3(normalize),
                     AV_OPT_TYPE_BOOL, {.i64 = -1}, -1, 1, FLAGS},
-            {"sample_rate_clap", "audio processing model expected sample rate", OFFSET3(sample_rate),
+            {"input_res", "video processing model expected input size", OFFSET3(input_resolution),
+                AV_OPT_TYPE_INT64, {.i64 = -1}, -1, 10000, FLAGS},
+            {"sample_rate", "audio processing model expected sample rate", OFFSET3(sample_rate),
                 AV_OPT_TYPE_INT64, {.i64 = 44100}, 1600, 192000, FLAGS},
             {"sample_duration", "audio processing model expected sample duration", OFFSET3(sample_duration),
                 AV_OPT_TYPE_INT64, {.i64 = 7}, 1, 100, FLAGS},
@@ -801,14 +803,14 @@ static int dnn_classify_activate(AVFilterContext *context)
             return ret;
         }
     } else {
-    ret = ff_inlink_consume_frame(inlink, &in);
-    if (ret < 0)
-        return ret;
-    if (ret > 0) {
-            ret = process_video_frame(ctx, in);
-        if (ret < 0) {
-            av_frame_free(&in);
+        ret = ff_inlink_consume_frame(inlink, &in);
+        if (ret < 0)
             return ret;
+        if (ret > 0) {
+            ret = process_video_frame(ctx, in);
+            if (ret < 0) {
+                av_frame_free(&in);
+                return ret;
             }
         }
     }
