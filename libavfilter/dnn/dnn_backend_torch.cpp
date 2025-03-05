@@ -26,6 +26,7 @@
 extern "C" {
 #include "dnn_io_proc.h"
 #include "dnn_backend_common.h"
+#include "../dnn_filter_common.h"
 #include "libavutil/opt.h"
 #include "libavutil/mem.h"
 #include "queue.h"
@@ -33,9 +34,6 @@ extern "C" {
 #include "libavutil/avassert.h"
 #include "libavutil/detection_bbox.h"
 #include "libavutil/avstring.h"
-#if (CONFIG_LIBTOKENIZERS == 1)
-#include "dnn_tokenizer.h"
-#endif
 }
 
 #include <torch/torch.h>
@@ -295,12 +293,11 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
         return AVERROR(EINVAL);
     }
 
-    int **tokens_array = NULL;
-    int *token_counts = NULL;
+    TokenizerEncodeResult *results = NULL;
     int ret;
 
     ret = ff_dnn_create_tokenizer_and_encode_batch(
-        tokenizer_path, labels, label_count, &tokens_array, &token_counts, ctx);
+        tokenizer_path, labels, label_count, &results, ctx);
 
     if (ret < 0) {
         av_log(ctx, AV_LOG_ERROR, "Failed to tokenize batch text\n");
@@ -322,11 +319,11 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
 
     // Fill the tensors directly
     for (int i = 0; i < label_count; i++) {
-        const int current_token_count = token_counts[i];
+        const int current_token_count = results[i].len;
 
         // Fill only the valid token positions, leaving zeros elsewhere
         for (int j = 0; j < current_token_count && j < token_dimension; j++) {
-            tokens_accessor[i][j] = static_cast<int64_t>(tokens_array[i][j]);
+            tokens_accessor[i][j] = static_cast<int64_t>(results[i].token_ids[j]);
             attention_accessor[i][j] = 1;
         }
     }
@@ -341,8 +338,7 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
         *clxp_ctx->attention_mask = clxp_ctx->attention_mask->to(device);
     }
 
-    ff_dnn_tokenizer_free_batch(tokens_array, label_count);
-    av_freep(&token_counts);
+    ff_dnn_tokenizer_free_results(results, label_count);
 
     return 0;
 }

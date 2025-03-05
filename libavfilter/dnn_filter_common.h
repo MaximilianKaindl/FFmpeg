@@ -25,6 +25,9 @@
 #define AVFILTER_DNN_FILTER_COMMON_H
 
 #include "dnn_interface.h"
+#if(CONFIG_LIBTOKENIZERS == 1)
+#include "tokenizers_c.h"
+#endif
 
 #define DNN_FILTER_CHILD_CLASS_ITERATE(name, backend_mask)                  \
     static const AVClass *name##_child_class_iterate(void **iter)           \
@@ -67,4 +70,19 @@ DNNAsyncStatusType ff_dnn_get_result(DnnContext *ctx, AVFrame **in_frame, AVFram
 int ff_dnn_flush(DnnContext *ctx);
 void ff_dnn_uninit(DnnContext *ctx);
 
+#if(CONFIG_LIBTOKENIZERS == 1)
+TokenizerHandle ff_dnn_tokenizer_create(const char *path, void *log_ctx);
+int ff_dnn_tokenizer_encode_batch(TokenizerHandle tokenizer, const char **texts, int text_count, TokenizerEncodeResult **results, void *log_ctx);
+int ff_dnn_create_tokenizer_and_encode_batch(const char *path, const char **texts, int text_count, TokenizerEncodeResult **results, void *log_ctx);
+
+inline void ff_dnn_tokenizer_free(TokenizerHandle tokenizer) {
+    if (tokenizer)
+        tokenizers_free(tokenizer);
+}
+inline void ff_dnn_tokenizer_free_results(TokenizerEncodeResult *results, int count) {
+    if (results) {
+        tokenizers_free_encode_results(results, count);
+    }
+}
+#endif
 #endif

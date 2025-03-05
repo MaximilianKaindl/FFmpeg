@@ -20,6 +20,13 @@
 #include "libavutil/avstring.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
+#include "libavformat/avio.h"
+#include "libavutil/error.h"
+#include "libavutil/log.h"
+
+#if (CONFIG_LIBTOKENIZERS == 1)
+#include "tokenizers_c.h"
+#endif
 
 #define MAX_SUPPORTED_OUTPUTS_NB 4
 
@@ -278,3 +285,153 @@ void ff_dnn_uninit(DnnContext *ctx)
         av_freep(&ctx->model_outputnames);
     }
 }
+
+static int load_file_content(const char *path, char **data, size_t *data_size,
+    void *log_ctx) {
+    AVIOContext *avio_ctx = NULL;
+    int ret;
+    int64_t size;
+
+    ret = avio_open(&avio_ctx, path, AVIO_FLAG_READ);
+    if (ret < 0) {
+        if (log_ctx)
+            av_log(log_ctx, AV_LOG_ERROR, "Cannot open file: %s\n", path);
+        return ret;
+    }
+
+    size = avio_size(avio_ctx);
+    if (size < 0) {
+        if (log_ctx)
+            av_log(log_ctx, AV_LOG_ERROR, "Failed to determine file size: %s\n", path);
+        avio_closep(&avio_ctx);
+        return size;
+    }
+
+    *data = av_malloc(size + 1);
+    if (!*data) {
+        avio_closep(&avio_ctx);
+        return AVERROR(ENOMEM);
+    }
+
+    ret = avio_read(avio_ctx, (unsigned char *)*data, size);
+    avio_closep(&avio_ctx);
+
+    if (ret < 0) {
+        if (log_ctx)
+            av_log(log_ctx, AV_LOG_ERROR, "Failed to read file: %s\n", path);
+        av_freep(data);
+        return ret;
+    }
+
+    if (ret != size) {
+        if (log_ctx)
+            av_log(log_ctx, AV_LOG_ERROR, "Incomplete read: %s\n", path);
+        av_freep(data);
+        return AVERROR(EIO);
+    }
+
+    // Null-terminate the data
+    (*data)[size] = '\0';
+    *data_size = size;
+
+    return 0;
+}
+
+#if (CONFIG_LIBTOKENIZERS == 1)
+TokenizerHandle ff_dnn_tokenizer_create(const char *path, void *log_ctx) {
+    char *blob = NULL;
+    size_t blob_size = 0;
+    TokenizerHandle handle = NULL;
+    int ret;
+
+    if (!path) {
+        if (log_ctx)
+            av_log(log_ctx, AV_LOG_ERROR, "Tokenizer path is NULL\n");
+        return NULL;
+    }
+
+    ret = load_file_content(path, &blob, &blob_size, log_ctx);
+    if (ret < 0)
+        return NULL;
+
+    handle = tokenizers_new_from_str(blob, blob_size);
+    av_freep(&blob);
+
+    if (!handle && log_ctx)
+        av_log(log_ctx, AV_LOG_ERROR, "Error creating tokenizer\n");
+
+    return handle;
+}
+
+int ff_dnn_tokenizer_encode_batch(TokenizerHandle tokenizer, const char **texts,
+                                  int text_count, TokenizerEncodeResult **results,
+                                  void *log_ctx) {
+    size_t *lengths = NULL;
+    int ret = 0;
+
+    if (!tokenizer) {
+        if (log_ctx)
+            av_log(log_ctx, AV_LOG_ERROR, "Tokenizer is NULL\n");
+        return AVERROR(EINVAL);
+    }
+
+    if (!texts || text_count <= 0 || !results) {
+        if (log_ctx)
+            av_log(log_ctx, AV_LOG_ERROR, "Invalid parameters\n");
+        return AVERROR(EINVAL);
+    }
+
+    *results = av_calloc(text_count, sizeof(**results));
+    if (!*results) {
+        ret = AVERROR(ENOMEM);
+        goto fail;
+    }
+
+    lengths = av_calloc(text_count, sizeof(*lengths));
+    if (!lengths) {
+        ret = AVERROR(ENOMEM);
+        goto fail;
+    }
+
+    // Calculate text lengths
+    for (int i = 0; i < text_count; i++) {
+        lengths[i] = texts[i] ? strlen(texts[i]) : 0;
+    }
+
+    // Tokenize all texts in batch - directly store results in the output array
+    tokenizers_encode_batch(tokenizer, texts, lengths, text_count, 1, *results);
+    
+    av_freep(&lengths);
+    return 0;
+
+fail:
+    av_freep(results);
+    av_freep(&lengths);
+    return ret;
+}
+
+int ff_dnn_create_tokenizer_and_encode_batch(const char *path,
+                                             const char **texts, int text_count,
+                                             TokenizerEncodeResult **results,
+                                             void *log_ctx) {
+    int ret;
+
+    // Create tokenizer
+    TokenizerHandle tokenizer = ff_dnn_tokenizer_create(path, log_ctx);
+    if (!tokenizer) {
+        av_log(log_ctx, AV_LOG_ERROR, "Error creating tokenizer\n");
+        return AVERROR(EINVAL);
+    }
+
+    // Tokenize batch
+    ret = ff_dnn_tokenizer_encode_batch(tokenizer, texts, text_count, results, log_ctx);
+
+    if (ret < 0) {
+        av_log(log_ctx, AV_LOG_ERROR, "Failed to tokenize batch text\n");
+    }
+
+    // Clean up tokenizer
+    ff_dnn_tokenizer_free(tokenizer);
+    return ret;
+}
+#endif
