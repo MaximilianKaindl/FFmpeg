@@ -49,7 +49,6 @@ extern "C" {
 typedef struct THClxpContext {
     torch::Tensor *tokenized_text;
     torch::Tensor *attention_mask;
-    int64_t resolution;
     int *softmax_units;
     int softmax_units_count;
 } THClxpContext;
@@ -278,47 +277,12 @@ static void deleter(void *arg)
     av_freep(&arg);
 }
 
-static int test_clip_input_res(THModel *th_model, const c10::Device &device)
-{
-    // Common CLIP input dimensions to test
-    std::vector<int64_t> test_dims[] = {
-        {1, 3, 224, 224},
-        {1, 3, 256, 256},
-        {1, 3, 384, 384},
-        {1, 3, 378, 378},
-    };
-    bool found_dims = false;
-    int64_t resolution = 0;
-
-    for (const auto &dims : test_dims) {
-        // Create test input tensor
-        torch::Tensor test_input = torch::zeros(dims);
-        if (test_input.device() != device) {
-            test_input = test_input.to(device);
-        }
-        try {
-            auto image_features =
-                th_model->jit_model->run_method("encode_image", test_input,
-                                                true // normalize
-                );
-        } catch (const c10::Error &e) {
-            continue;
-        }
-        resolution = dims[2];
-        found_dims = true;
-        break;
-    }
-    if (!found_dims) {
-        return AVERROR(EINVAL);
-    }
-    return resolution;
-}
 
 #if (CONFIG_LIBTOKENIZERS == 1)
 
 static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
-                               int label_count, const char *tokenizer_path,
-                               DnnContext *ctx, const c10::Device &device)
+    int label_count, const char *tokenizer_path,
+    DnnContext *ctx, const c10::Device &device)
 {
     // Early validation to avoid unnecessary processing
     if (!labels || label_count <= 0) {
@@ -364,7 +328,7 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
         for (int j = 0; j < current_token_count && j < token_dimension; j++) {
             tokens_accessor[i][j] = static_cast<int64_t>(tokens_array[i][j]);
             attention_accessor[i][j] = 1;
-    }
+        }
     }
 
     clxp_ctx->tokenized_text = new torch::Tensor(tokenized_text);
@@ -404,20 +368,65 @@ static int copy_softmax_units(THModel *th_model, const int *softmax_units, int s
 }
 
 static int test_clip_inference(THModel *th_model, const c10::Device &device){
-    try {
-        // Should throw exception if not existing
-        auto encode_image = th_model->jit_model->get_method("encode_image");
-        th_model->clxp_ctx->resolution = test_clip_input_res(th_model, device);
-        if (th_model->clxp_ctx->resolution <= 0) {
+    // Try given resolution
+    if(th_model->ctx->torch_option.input_resolution >= 0){
+        try {
+            torch::Tensor test_input = torch::zeros(th_model->ctx->torch_option.input_resolution);
+            if (test_input.device() != device) {
+                test_input = test_input.to(device);
+            }
+            std::vector<torch::jit::IValue> inputs;
+            inputs.push_back(test_input);
+            inputs.push_back(*th_model->clxp_ctx->tokenized_text);
+            auto output = th_model->jit_model->forward(inputs);
+        } catch (const std::exception &e) {
             av_log(th_model->ctx, AV_LOG_ERROR,
-                    "Failed to determine input resolution for CLIP model\n");
+                    "CLIP Input Resolution %ld did not work\n", th_model->ctx->torch_option.input_resolution);
             return AVERROR(EINVAL);
         }
-    } catch (const c10::Error &e) {
+        return 0;
+    }
+
+    // Common CLIP input dimensions to test
+    std::vector<int64_t> test_dims[] = {
+        {1, 3, 224, 224},
+        {1, 3, 256, 256},
+        {1, 3, 384, 384},
+        {1, 3, 378, 378},
+    };
+    bool found_dims = false;
+    int64_t resolution = 0;
+
+    for (const auto &dims : test_dims) {
+        // Create test input tensor
+        torch::Tensor test_input = torch::zeros(dims);
+        if (test_input.device() != device) {
+            test_input = test_input.to(device);
+        }
+        try {
+            std::vector<torch::jit::IValue> inputs;
+            inputs.push_back(test_input);
+            inputs.push_back(*th_model->clxp_ctx->tokenized_text);
+            auto output = th_model->jit_model->forward(inputs);
+        } catch (const std::exception &e) {
+            av_log(th_model->ctx, AV_LOG_WARNING,
+                    "CLIP Input Resolution %ld did not work\n", dims[2]);
+            continue;
+        }
+        resolution = dims[2];
+        found_dims = true;
+        break;
+    }
+    if (!found_dims || resolution <= 0) {
         av_log(th_model->ctx, AV_LOG_ERROR,
-                "Error during CLIP model initialization: %s\n", e.what());
+            "Failed to determine input resolution for CLIP model\n");
         return AVERROR(EINVAL);
     }
+    // Log the resolution chosen for the CLIP model
+    av_log(th_model->ctx, AV_LOG_INFO, 
+        "Using input resolution %ldx%ld for CLIP model\n", 
+        resolution, resolution);
+    th_model->ctx->torch_option.input_resolution = resolution;
     return 0;
 }
 
@@ -442,6 +451,10 @@ static int test_clap_inference(THModel *th_model, int64_t sample_rate, int64_t s
     } catch (const c10::Error &e) {
         av_log(th_model->ctx, AV_LOG_ERROR,
                 "Error during CLIP model initialization: %s\n", e.what());
+        return AVERROR(EINVAL);
+    } catch (const std::exception &e) {
+        av_log(th_model->ctx, AV_LOG_ERROR,
+                "Error during CLAP model inference testing\n");
         return AVERROR(EINVAL);
     }
     return 0;
@@ -674,8 +687,7 @@ static int preprocess_image_tensor(const THModel *th_model,
         *input_tensor = torch::nn::functional::interpolate(
             *input_tensor,
             torch::nn::functional::InterpolateFuncOptions()
-                .size(std::vector<int64_t>{th_model->clxp_ctx->resolution,
-                                           th_model->clxp_ctx->resolution})
+                .size(std::vector<int64_t>{ctx->torch_option.input_resolution, ctx->torch_option.input_resolution})
                 .mode(torch::kBicubic)
                 .align_corners(false));
         return 0;
@@ -1270,7 +1282,7 @@ static DNNModel *dnn_load_model_with_tokenizer_th(
         return NULL;
     }
 #if (CONFIG_LIBTOKENIZERS == 1)
-    // Check if this is a CLIP model and initialize accordingly
+    // Check if this is a CLXP model and initialize accordingly
     auto model = &th_model->model;
     if ((func_type == DFT_ANALYTICS_CLIP || func_type == DFT_ANALYTICS_CLAP)) {
         ret = init_clxp_model(th_model, func_type, labels, label_count,

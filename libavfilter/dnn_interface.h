@@ -156,6 +156,7 @@ typedef struct THOptions {
     int normalize;      // Normalize the input tensor
 
     int64_t token_dimension;
+    int64_t input_resolution;
     int64_t sample_rate;
     int64_t sample_duration;
 } THOptions;
