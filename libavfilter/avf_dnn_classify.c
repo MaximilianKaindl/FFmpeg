@@ -671,9 +671,8 @@ static int dnn_classify_flush_frame(AVFilterLink *outlink, int64_t pts,
     return 0;
 }
 
-static int process_video_frame(AVFilterContext *context, AVFrame *frame)
+static int process_video_frame(DnnClassifyContext *ctx, AVFrame *frame)
 {
-    DnnClassifyContext *ctx = context->priv;
     int ret;
 
     if (ctx->dnnctx.backend_type == DNN_TH) {
@@ -694,21 +693,9 @@ static int process_video_frame(AVFilterContext *context, AVFrame *frame)
     return 0;
 }
 
-static int process_audio_frame(AVFilterContext *context, AVFrame *frame)
+static int process_audio_frame(DnnClassifyContext *ctx, AVFrame *frame)
 {
-    DnnClassifyContext *ctx = context->priv;
-    int ret;
-
-    int64_t samples_per_frame = ctx->dnnctx.torch_option.sample_rate * ctx->dnnctx.torch_option.sample_duration;
-
-    if (frame->nb_samples < samples_per_frame) {
-        av_log(context, AV_LOG_WARNING,
-               "Audio frame too short for CLAP analysis (needs %d samples, got "
-               "%d)\n",
-               samples_per_frame, frame->nb_samples);
-    }
-
-    ret = ff_dnn_execute_model_clap(
+    int ret = ff_dnn_execute_model_clap(
         &ctx->dnnctx, frame, NULL, ctx->label_classification_ctx->labels,
         ctx->label_classification_ctx->label_count, ctx->tokenizer_path);
 
@@ -719,6 +706,73 @@ static int process_audio_frame(AVFilterContext *context, AVFrame *frame)
 
     return 0;
 }
+
+static int process_audio_buffer(DnnClassifyContext *ctx, AVFilterLink *inlink){
+    static AVFrame *audio_buffer = NULL;
+    static int buffer_offset = 0;
+    int64_t required_samples = ctx->dnnctx.torch_option.sample_rate * ctx->dnnctx.torch_option.sample_duration;
+    int ret = 0, samples_to_copy = 0;
+    AVFrame *in = NULL;
+
+    while (buffer_offset < required_samples) {
+        ret = ff_inlink_consume_frame(inlink, &in);
+        if (ret < 0)
+            return ret;
+        if (ret == 0)
+            break; // No more frames available right now
+            
+        // First frame - initialize our buffer
+        if (!audio_buffer) {
+            audio_buffer = av_frame_alloc();
+            if (!audio_buffer) {
+                av_frame_free(&in);
+                return AVERROR(ENOMEM);
+            }
+            
+            // Allocate our buffer to hold exactly required_samples
+            audio_buffer->format = in->format;
+            audio_buffer->ch_layout = in->ch_layout;
+            audio_buffer->sample_rate = in->sample_rate;
+            audio_buffer->nb_samples = required_samples;
+            audio_buffer->pts = in->pts;
+            
+            ret = av_frame_get_buffer(audio_buffer, 0);
+            if (ret < 0) {
+                av_frame_free(&audio_buffer);
+                av_frame_free(&in);
+                return ret;
+            }
+        }
+        
+        // Copy samples to our buffer
+        samples_to_copy = FFMIN(in->nb_samples, required_samples - buffer_offset);
+        for (int ch = 0; ch < inlink->ch_layout.nb_channels; ch++) {
+            if(!in->data[ch] || !audio_buffer->data[ch]) {
+                continue;
+            }
+            memcpy((float*)audio_buffer->data[ch] + buffer_offset, 
+                   (float*)in->data[ch], 
+                   samples_to_copy * sizeof(float));
+        }
+        
+        buffer_offset += samples_to_copy;
+        av_frame_free(&in);
+        
+        // If we've filled our buffer, process it
+        if (buffer_offset >= required_samples) {
+            ret = process_audio_frame(ctx, audio_buffer);
+            if (ret < 0)
+                return ret;
+                
+            // Reset for next frame
+            audio_buffer = NULL;
+            buffer_offset = 0;
+            break;
+        }
+    }
+    return ret;
+}
+
 
 static int dnn_classify_activate(AVFilterContext *context)
 {
@@ -741,21 +795,21 @@ static int dnn_classify_activate(AVFilterContext *context)
         }
     }
 
-    // Process frames
+    if (ctx->type == AVMEDIA_TYPE_AUDIO) {
+        ret = process_audio_buffer(ctx, inlink);
+        if(ret < 0){
+            return ret;
+        }
+    } else {
     ret = ff_inlink_consume_frame(inlink, &in);
     if (ret < 0)
         return ret;
     if (ret > 0) {
-        // Process frame based on media type
-        if (ctx->type == AVMEDIA_TYPE_VIDEO) {
-            ret = process_video_frame(context, in);
-        } else {
-            ret = process_audio_frame(context, in);
-        }
-
+            ret = process_video_frame(ctx, in);
         if (ret < 0) {
             av_frame_free(&in);
             return ret;
+            }
         }
     }
 
