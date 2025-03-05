@@ -99,8 +99,6 @@ typedef struct CategoryClassifcationContext {
    int total_categories;
 } CategoryClassifcationContext;
 
-#define TYPE_ALL 2  // Number of media types (video and audio)
-
 typedef struct DnnClassifyContext {
     const AVClass *class;
     DnnContext dnnctx;
@@ -126,51 +124,32 @@ typedef struct DnnClassifyContext {
 #if (CONFIG_LIBTORCH == 1)
 #define OFFSET3(x) offsetof(DnnClassifyContext, dnnctx.torch_option.x)
 #endif
-#define FLAGS                                               \
-    AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM | \
-        AV_OPT_FLAG_AUDIO_PARAM
+#define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_AUDIO_PARAM
 
-        static const AVOption dnn_classify_options[] = {
-            {"dnn_backend", "DNN backend", OFFSET(backend_type), AV_OPT_TYPE_INT,
-             {.i64 = DNN_OV}, INT_MIN, INT_MAX, FLAGS, .unit = "backend"},
-        #if (CONFIG_LIBOPENVINO == 1)
-            {"openvino", "openvino backend flag", 0, AV_OPT_TYPE_CONST,
-             {.i64 = DNN_OV}, 0, 0, FLAGS, .unit = "backend"},
-        #endif
-        #if (CONFIG_LIBTORCH == 1)
-            {"torch", "torch backend flag", 0, AV_OPT_TYPE_CONST,
-             {.i64 = DNN_TH}, 0, 0, FLAGS, .unit = "backend"},
-             {"logit_scale", "logit scale for similarity calculation",
-                OFFSET3(logit_scale), AV_OPT_TYPE_FLOAT, {.dbl = -1.0}, -1.0, 100.0, FLAGS},
-            {"temperature", "softmax temperature", OFFSET3(temperature),
-                AV_OPT_TYPE_FLOAT, {.dbl = 1.0}, 1, 100.0, FLAGS},
-            {"forward_order", "Order of forward output (0: media text, 1: text media) (CLIP/CLAP only)", OFFSET3(forward_order),
-                    AV_OPT_TYPE_BOOL, {.i64 = -1}, -1, 1, FLAGS},
-            {"normalize", "Normalize the input tensor (CLIP/CLAP only)", OFFSET3(normalize),
-                    AV_OPT_TYPE_BOOL, {.i64 = -1}, -1, 1, FLAGS},
-            {"input_res", "video processing model expected input size", OFFSET3(input_resolution),
-                AV_OPT_TYPE_INT64, {.i64 = -1}, -1, 10000, FLAGS},
-            {"sample_rate", "audio processing model expected sample rate", OFFSET3(sample_rate),
-                AV_OPT_TYPE_INT64, {.i64 = 44100}, 1600, 192000, FLAGS},
-            {"sample_duration", "audio processing model expected sample duration", OFFSET3(sample_duration),
-                AV_OPT_TYPE_INT64, {.i64 = 7}, 1, 100, FLAGS},
-            {"token_dimension", "dimension of token vector", OFFSET3(token_dimension),
-                AV_OPT_TYPE_INT64, {.i64 = 77}, 1, 10000, FLAGS},
-        #endif
-            {"confidence", "threshold of confidence", OFFSET2(confidence),
-             AV_OPT_TYPE_FLOAT, {.dbl = 0.5}, 0, 1, FLAGS},
-            {"labels", "path to labels file", OFFSET2(labels_filename),
-             AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
-            {"target", "which one to be classified", OFFSET2(target),
-             AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
-            {"categories", "path to categories file (CLIP/CLAP only)",
-             OFFSET2(categories_filename), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
-            {"tokenizer", "path to text tokenizer.json file (CLIP/CLAP only)",
-             OFFSET2(tokenizer_path), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, FLAGS},
-            {"is_audio", "audio processing mode", OFFSET2(is_audio),
-                AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, FLAGS},
-            {NULL}
-        };
+static const AVOption dnn_classify_options[] = {
+    { "dnn_backend",    "DNN backend",                                   OFFSET(backend_type),          AV_OPT_TYPE_INT,    { .i64 = DNN_OV },   INT_MIN, INT_MAX, FLAGS, .unit = "backend" },
+#if (CONFIG_LIBOPENVINO == 1)
+    { "openvino",       "openvino backend flag",                         0,                             AV_OPT_TYPE_CONST,  { .i64 = DNN_OV },   0,       0,       FLAGS, .unit = "backend" },
+#endif
+#if (CONFIG_LIBTORCH == 1)
+    { "torch",          "torch backend flag",                            0,                             AV_OPT_TYPE_CONST,  { .i64 = DNN_TH },   0,       0,       FLAGS, .unit = "backend" },
+    { "logit_scale",    "logit scale for similarity calculation",        OFFSET3(logit_scale),          AV_OPT_TYPE_FLOAT,  { .dbl = -1.0 },     -1.0,    100.0,   FLAGS },
+    { "temperature",    "softmax temperature",                           OFFSET3(temperature),          AV_OPT_TYPE_FLOAT,  { .dbl = 1.0 },      1,       100.0,   FLAGS },
+    { "forward_order",  "Order of forward output (0: media text, 1: text media) (CLIP/CLAP only)", OFFSET3(forward_order), AV_OPT_TYPE_BOOL,   { .i64 = -1 },     -1,      1,       FLAGS },
+    { "normalize",      "Normalize the input tensor (CLIP/CLAP only)",   OFFSET3(normalize),            AV_OPT_TYPE_BOOL,   { .i64 = -1 },       -1,      1,       FLAGS },
+    { "input_res",      "video processing model expected input size",    OFFSET3(input_resolution),     AV_OPT_TYPE_INT64,  { .i64 = -1 },       -1,      10000,   FLAGS },
+    { "sample_rate",    "audio processing model expected sample rate",   OFFSET3(sample_rate),          AV_OPT_TYPE_INT64,  { .i64 = 44100 },    1600,    192000,  FLAGS },
+    { "sample_duration","audio processing model expected sample duration",OFFSET3(sample_duration),     AV_OPT_TYPE_INT64,  { .i64 = 7 },        1,       100,     FLAGS },
+    { "token_dimension","dimension of token vector",                     OFFSET3(token_dimension),      AV_OPT_TYPE_INT64,  { .i64 = 77 },       1,       10000,   FLAGS },
+#endif
+    { "confidence",     "threshold of confidence",                       OFFSET2(confidence),           AV_OPT_TYPE_FLOAT,  { .dbl = 0.5 },      0,       1,       FLAGS },
+    { "labels",         "path to labels file",                           OFFSET2(labels_filename),      AV_OPT_TYPE_STRING, { .str = NULL },     0,       0,       FLAGS },
+    { "target",         "which one to be classified",                    OFFSET2(target),               AV_OPT_TYPE_STRING, { .str = NULL },     0,       0,       FLAGS },
+    { "categories",     "path to categories file (CLIP/CLAP only)",      OFFSET2(categories_filename),  AV_OPT_TYPE_STRING, { .str = NULL },     0,       0,       FLAGS },
+    { "tokenizer",      "path to text tokenizer.json file (CLIP/CLAP only)", OFFSET2(tokenizer_path),   AV_OPT_TYPE_STRING, { .str = NULL },     0,       0,       FLAGS },
+    { "is_audio",       "audio processing mode",                         OFFSET2(is_audio),             AV_OPT_TYPE_BOOL,   { .i64 = 0 },        0,       1,       FLAGS },
+    { NULL }
+};
 
 AVFILTER_DNN_DEFINE_CLASS(dnn_classify, DNN_OV);
 
@@ -655,8 +634,7 @@ static int post_proc_standard(AVFrame *frame, DNNData *output,
 
     if (bbox_index == 0) {
         av_strlcat(header->source, ", ", sizeof(header->source));
-        av_strlcat(header->source, ctx->dnnctx.model_filename,
-                   sizeof(header->source));
+        av_strlcat(header->source, ctx->dnnctx.model_filename, sizeof(header->source));
     }
 
     classifications = output->data;
@@ -704,7 +682,6 @@ static int post_proc_clxp_labels(AVFrame *frame, DNNData *output,
     float confidence_threshold = ctx->confidence;
     int ret;
 
-    // Get or create detection bbox
     bbox = find_or_create_detection_bbox(frame, bbox_index, filter_ctx, ctx);
     if (!bbox) {
         return AVERROR(EINVAL);
@@ -735,13 +712,12 @@ static int post_proc_clxp_categories(AVFrame *frame, DNNData *output,
     char **ctx_labels;
     float *ctx_probabilities;
 
-    // Get or create detection bbox
     bbox = find_or_create_detection_bbox(frame, bbox_index, filter_ctx, ctx);
     if (!bbox) {
         return AVERROR(EINVAL);
     }
 
-    // Allocate temporary arrays
+    // Allocate temporary arrays for category results
     ctx_labels = av_malloc_array(cat_class_ctx->num_contexts, sizeof(char *));
     if (!ctx_labels) {
         return AVERROR(ENOMEM);
@@ -759,8 +735,7 @@ static int post_proc_clxp_categories(AVFrame *frame, DNNData *output,
         }
     }
 
-    ctx_probabilities =
-        av_malloc_array(cat_class_ctx->num_contexts, sizeof(float));
+    ctx_probabilities = av_malloc_array(cat_class_ctx->num_contexts, sizeof(float));
     if (!ctx_probabilities) {
         // Clean up
         for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
@@ -775,32 +750,26 @@ static int post_proc_clxp_categories(AVFrame *frame, DNNData *output,
         CategoriesContext *categories_ctx =
             cat_class_ctx->category_units[ctx_idx];
         if (!categories_ctx) {
-            av_log(filter_ctx, AV_LOG_ERROR,
-                   "Missing classification data at context %d\n", ctx_idx);
+            av_log(filter_ctx, AV_LOG_ERROR, "Missing classification data at context %d\n", ctx_idx);
             continue;
         }
 
-        // Find best category
-        best_category =
-            get_best_category(categories_ctx, probabilities + prob_offset);
+        // Find best category in context
+        best_category = get_best_category(categories_ctx, probabilities + prob_offset);
         if (!best_category || !best_category->name) {
-            av_log(filter_ctx, AV_LOG_ERROR,
-                   "Invalid best category at context %d\n", ctx_idx);
+            av_log(filter_ctx, AV_LOG_ERROR, "Invalid best category at context %d\n", ctx_idx);
             continue;
         }
 
         // Copy category name instead of assigning pointer
-        av_strlcpy(ctx_labels[ctx_idx], best_category->name,
-                   AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+        av_strlcpy(ctx_labels[ctx_idx], best_category->name, AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
         ctx_probabilities[ctx_idx] = best_category->total_probability;
 
         prob_offset += categories_ctx->label_count;
     }
 
     // Fill bbox with best labels
-    ret = av_detection_bbox_fill_with_best_labels(
-        ctx_labels, ctx_probabilities, cat_class_ctx->num_contexts, bbox,
-        AV_NUM_DETECTION_BBOX_CLASSIFY, ctx->confidence);
+    ret = av_detection_bbox_fill_with_best_labels(ctx_labels, ctx_probabilities, cat_class_ctx->num_contexts, bbox, AV_NUM_DETECTION_BBOX_CLASSIFY, ctx->confidence);
 
     // Clean up
     for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
@@ -818,12 +787,6 @@ static int dnn_classify_post_proc(AVFrame *frame, DNNData *output,
 {
     DnnClassifyContext *ctx = filter_ctx->priv;
 
-    if (!frame || !output || !output->data) {
-        av_log(filter_ctx, AV_LOG_ERROR, "Invalid input to post processing\n");
-        return AVERROR(EINVAL);
-    }
-
-    // Choose post-processing based on backend and context
     if (ctx->dnnctx.backend_type == DNN_TH) {
         if (ctx->category_classification_ctx) {
             return post_proc_clxp_categories(frame, output, bbox_index,
@@ -835,7 +798,6 @@ static int dnn_classify_post_proc(AVFrame *frame, DNNData *output,
                "No valid classification context available\n");
         return AVERROR(EINVAL);
     } else {
-        // Standard classification (video only)
         return post_proc_standard(frame, output, bbox_index, filter_ctx);
     }
 }
@@ -889,7 +851,6 @@ static int config_input(AVFilterLink *inlink)
 
     // Set type-specific parameters and check compatibility
     if (ctx->type == AVMEDIA_TYPE_AUDIO) {
-        // Audio-specific settings
         goal_mode = DFT_ANALYTICS_CLAP;
 
         // Check backend compatibility
@@ -899,7 +860,6 @@ static int config_input(AVFilterLink *inlink)
             return AVERROR(EINVAL);
         }
 
-        // Check sample rate
         if (inlink->sample_rate != sample_rate) {
             av_log(context, AV_LOG_ERROR,
                    "Invalid sample rate. CLAP requires 44100 Hz\n");
@@ -929,7 +889,6 @@ static int config_input(AVFilterLink *inlink)
                 av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
                 return ret;
             }
-            // Initialize DNN with tokenizer for CLIP/CLAP models
             ret = ff_dnn_init_with_tokenizer(
                 &ctx->dnnctx, goal_mode, ctx->label_classification_ctx->labels,
                 ctx->label_classification_ctx->label_count, NULL, 0, ctx->tokenizer_path,
@@ -1082,6 +1041,17 @@ static av_cold int dnn_classify_init(AVFilterContext *context)
     return 0;
 }
 
+static const enum AVPixelFormat pix_fmts[] = {
+    AV_PIX_FMT_RGB24, AV_PIX_FMT_BGR24,
+    AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAYF32,
+    AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
+    AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
+    AV_PIX_FMT_NV12,
+    AV_PIX_FMT_NONE
+};
+
+static const enum AVSampleFormat sample_fmts[] = {AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_NONE};
+
 static int query_formats(AVFilterContext *ctx)
 {
     DnnClassifyContext *classify_ctx = ctx->priv;
@@ -1091,18 +1061,11 @@ static int query_formats(AVFilterContext *ctx)
     enum AVMediaType type = ctx->inputs[0]->type;
 
     if (type == AVMEDIA_TYPE_VIDEO) {
-        static const enum AVPixelFormat pix_fmts[] = {
-            AV_PIX_FMT_RGB24,   AV_PIX_FMT_BGR24,   AV_PIX_FMT_GRAY8,
-            AV_PIX_FMT_GRAYF32, AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
-            AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
-            AV_PIX_FMT_NV12,    AV_PIX_FMT_NONE};
-
         ret = ff_set_common_formats(ctx, ff_make_format_list(pix_fmts));
         if (ret < 0)
             return ret;
     } else if (type == AVMEDIA_TYPE_AUDIO) {
-        static const enum AVSampleFormat sample_fmts[] = {AV_SAMPLE_FMT_FLT,
-                                                          AV_SAMPLE_FMT_NONE};
+        
 
         ret = ff_set_common_formats(ctx, ff_make_format_list(sample_fmts));
         if (ret < 0)
@@ -1326,14 +1289,14 @@ static av_cold void dnn_classify_uninit(AVFilterContext *context)
 }
 
 const FFFilter ff_avf_dnn_classify = {
-    .p.name = "dnn_classify",
-    .p.description = NULL_IF_CONFIG_SMALL("Apply DNN classification filter to the input."),
-    .p.priv_class = &dnn_classify_class,
-    .p.flags = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
-    .priv_size = sizeof(DnnClassifyContext),
-    .preinit = ff_dnn_filter_init_child_class,
-    .init = dnn_classify_init,
-    .uninit = dnn_classify_uninit,
-    .activate = dnn_classify_activate,
+    .p.name         = "dnn_classify",
+    .p.description  = NULL_IF_CONFIG_SMALL("Apply DNN classification filter to the input."),
+    .p.priv_class   = &dnn_classify_class,
+    .p.flags        = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
+    .priv_size      = sizeof(DnnClassifyContext),
+    .preinit        = ff_dnn_filter_init_child_class,
+    .init           = dnn_classify_init,
+    .uninit         = dnn_classify_uninit,
+    .activate       = dnn_classify_activate,
     FILTER_QUERY_FUNC2(query_formats),
 };
