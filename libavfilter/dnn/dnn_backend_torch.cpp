@@ -477,21 +477,17 @@ static torch::Tensor calculate_similarity(torch::Tensor &tensor1,
                                           DnnContext *ctx)
 {
     try {
-        // Make copies to avoid modifying the original tensors
-        torch::Tensor t1 = tensor1.clone();
-        torch::Tensor t2 = tensor2.clone();
-
         if (normalize) {
-            t1 = torch::nn::functional::normalize(
-                t1, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
+            tensor1 = torch::nn::functional::normalize(
+                tensor1, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
 
-            t2 = torch::nn::functional::normalize(
-                t2, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
+            tensor2 = torch::nn::functional::normalize(
+                tensor2, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
         }
 
         // Compute similarity matrix
         torch::Tensor similarity =
-            logit_scale * torch::matmul(t2, t1.transpose(0, 1));
+            logit_scale * torch::matmul(tensor2, tensor1.transpose(0, 1));
         return similarity.transpose(0, 1);
     } catch (const c10::Error &e) {
         if (ctx) {
