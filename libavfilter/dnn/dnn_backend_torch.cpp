@@ -320,10 +320,7 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
                                int label_count, const char *tokenizer_path,
                                DnnContext *ctx, const c10::Device &device)
 {
-    int **tokens_array = NULL;
-    int *token_counts = NULL;
-    int ret;
-
+    // Early validation to avoid unnecessary processing
     if (!labels || label_count <= 0) {
         av_log(ctx, AV_LOG_ERROR, "Label file invalid.\n");
         return AVERROR(EINVAL);
@@ -334,6 +331,10 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
         return AVERROR(EINVAL);
     }
 
+    int **tokens_array = NULL;
+    int *token_counts = NULL;
+    int ret;
+
     ret = ff_dnn_create_tokenizer_and_encode_batch(
         tokenizer_path, labels, label_count, &tokens_array, &token_counts, ctx);
 
@@ -342,49 +343,40 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels,
         return ret;
     }
 
-    // Create tensors for tokens and attention mask
-    std::vector<torch::Tensor> tokens_tensors;
-    std::vector<torch::Tensor> attention_tensors;
-    int64_t token_dimension = ctx->torch_option.token_dimension;
+    const int64_t token_dimension = ctx->torch_option.token_dimension;
 
+    // Create the tensors directly with the final batch dimensions
+    // Shape: [batch_size, token_dimension]
+    auto tokenized_text = torch::zeros({label_count, token_dimension}, 
+            torch::TensorOptions().dtype(torch::kInt64));
+    auto attention_mask = torch::zeros({label_count, token_dimension}, 
+            torch::TensorOptions().dtype(torch::kInt64));
+
+    // Get accessors for direct, efficient memory access
+    auto tokens_accessor = tokenized_text.accessor<int64_t, 2>();
+    auto attention_accessor = attention_mask.accessor<int64_t, 2>();
+
+    // Fill the tensors directly
     for (int i = 0; i < label_count; i++) {
-        std::vector<int64_t> current_tokens;
-        std::vector<int64_t> current_attention;
+        const int current_token_count = token_counts[i];
 
-        current_tokens.reserve(token_dimension);
-        current_attention.reserve(token_dimension);
-
-        for (int j = 0; j < token_dimension; j++) {
-            if (j < token_counts[i]) {
-                current_tokens.push_back(
-                    static_cast<int64_t>(tokens_array[i][j]));
-                current_attention.push_back(
-                    1); // Set all valid token positions to 1
-            } else {
-                current_tokens.push_back(0);    // Padding for tokens
-                current_attention.push_back(0); // Padding for attention mask
-            }
-        }
-
-        tokens_tensors.push_back(torch::tensor(current_tokens, torch::kInt64));
-        attention_tensors.push_back(
-            torch::tensor(current_attention, torch::kInt64));
+        // Fill only the valid token positions, leaving zeros elsewhere
+        for (int j = 0; j < current_token_count && j < token_dimension; j++) {
+            tokens_accessor[i][j] = static_cast<int64_t>(tokens_array[i][j]);
+            attention_accessor[i][j] = 1;
+    }
     }
 
-    // Stack all tensors into batches
-    clxp_ctx->tokenized_text = new torch::Tensor(torch::stack(tokens_tensors));
-    clxp_ctx->attention_mask =
-        new torch::Tensor(torch::stack(attention_tensors));
+    clxp_ctx->tokenized_text = new torch::Tensor(tokenized_text);
+    clxp_ctx->attention_mask = new torch::Tensor(attention_mask);
 
-    // Move tensors to the appropriate device
-    if (clxp_ctx->tokenized_text->device() != device) {
+    if(clxp_ctx->tokenized_text->device() != device){
         *clxp_ctx->tokenized_text = clxp_ctx->tokenized_text->to(device);
     }
-    if (clxp_ctx->attention_mask->device() != device) {
+    if(clxp_ctx->attention_mask->device() != device){
         *clxp_ctx->attention_mask = clxp_ctx->attention_mask->to(device);
     }
 
-    // Free allocated memory
     ff_dnn_tokenizer_free_batch(tokens_array, label_count);
     av_freep(&token_counts);
 
