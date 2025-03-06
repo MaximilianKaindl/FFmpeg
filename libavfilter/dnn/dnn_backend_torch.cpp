@@ -477,7 +477,7 @@ static torch::Tensor calculate_similarity(torch::Tensor &tensor1, torch::Tensor 
     }
 }
 
-static torch::Tensor apply_softmax(torch::Tensor input_tensor, const int *softmax_units, int softmax_units_count,
+static torch::Tensor apply_softmax(torch::Tensor input_tensor, float temperature,const int *softmax_units, int softmax_units_count,
                                    DnnContext *ctx)
 {
     try {
@@ -487,34 +487,46 @@ static torch::Tensor apply_softmax(torch::Tensor input_tensor, const int *softma
             return input_tensor;
         }
 
-        // If no specific units are provided, apply softmax to the entire tensor
-        if (!softmax_units || softmax_units_count <= 0) {
-            return torch::nn::functional::softmax(input_tensor, torch::nn::functional::SoftmaxFuncOptions(1));
+        // Apply temperature if needed
+        torch::Tensor scaled_tensor;
+        if (temperature > 0.0f && temperature != 1.0f) {
+            scaled_tensor = input_tensor / temperature;
+        } else {
+            scaled_tensor = input_tensor;
         }
 
-        torch::Tensor result = input_tensor.clone();
+        // If no specific units are provided, apply softmax to the entire tensor
+        if (!softmax_units || softmax_units_count <= 0) {
+            return torch::nn::functional::softmax(scaled_tensor, torch::nn::functional::SoftmaxFuncOptions(1));
+        }
+
+        // Create a new output tensor with the same shape as the input
+        torch::Tensor result = torch::empty_like(scaled_tensor);
         int offset = 0;
 
         // Apply softmax to each specified segment
         for (int i = 0; i < softmax_units_count; i++) {
             int length = softmax_units[i];
-            if (length <= 0 || offset + length > input_tensor.size(1)) {
+            if (length <= 0 || offset + length > scaled_tensor.size(1)) {
                 continue;
             }
 
-            // Select the segment to apply softmax
-            torch::Tensor segment = result.slice(1, offset, offset + length);
-
-            // Apply softmax along dimension 1 (across labels in segment)
-            torch::Tensor softmax_segment =
-                torch::nn::functional::softmax(segment, torch::nn::functional::SoftmaxFuncOptions(1));
-
-            // Put softmaxed segment back into result tensor
-            result.slice(1, offset, offset + length) = softmax_segment;
+            // Apply softmax to the segment and directly place it in the result tensor
+            result.slice(1, offset, offset + length) = torch::nn::functional::softmax(
+                scaled_tensor.slice(1, offset, offset + length), torch::nn::functional::SoftmaxFuncOptions(1));
 
             // Move offset forward
             offset += length;
         }
+
+        // Copy any remaining unprocessed parts if there are any
+        if (offset < scaled_tensor.size(1)) {
+            result.slice(1, offset, scaled_tensor.size(1)) = scaled_tensor.slice(1, offset, scaled_tensor.size(1));
+            // Copy remaining unprocessed elements without modification
+            av_log(ctx, AV_LOG_WARNING, "Some tensor elements (%d to %ld) were not processed by softmax\n", 
+                offset, scaled_tensor.size(1) - 1);
+        }
+
         return result;
     } catch (const c10::Error &e) {
         if (ctx) {
@@ -820,8 +832,9 @@ static int th_start_inference(void *args)
                 *infer_request->output = calculate_similarity(media_embeddings, text_embeddings,
                                                               th_model->ctx->torch_option.normalize, logit_scale, ctx);
             }
-            *infer_request->output = apply_softmax(*infer_request->output, th_model->clxp_ctx->softmax_units,
-                                                   th_model->clxp_ctx->softmax_units_count, ctx);
+            *infer_request->output =
+                apply_softmax(*infer_request->output, th_model->ctx->torch_option.temperature,
+                              th_model->clxp_ctx->softmax_units, th_model->clxp_ctx->softmax_units_count, ctx);
         }
     } else {
         avpriv_report_missing_feature(ctx, "model function type %d", th_model->model.func_type);
@@ -1057,6 +1070,13 @@ static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilt
         ctx->torch_option.logit_scale = func_type == DFT_ANALYTICS_CLAP ? 33.37 : 4.6052;
         // Log the default value for logit_scale
         av_log(ctx, AV_LOG_INFO, "Using default logit_scale=%.4f for %s input\n", ctx->torch_option.logit_scale,
+               func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
+    }
+    if (ctx->torch_option.temperature <= 0) {
+        // set default value for logit_scale
+        ctx->torch_option.temperature = 1;
+        // Log the default value for logit_scale
+        av_log(ctx, AV_LOG_INFO, "Using default temperature=%.4f for %s input\n", ctx->torch_option.temperature,
                func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
     }
     if (ctx->torch_option.normalize < 0) {

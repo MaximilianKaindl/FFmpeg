@@ -134,7 +134,7 @@ static const AVOption dnn_classify_options[] = {
 #if (CONFIG_LIBTORCH == 1)
     { "torch",          "torch backend flag",                            0,                             AV_OPT_TYPE_CONST,  { .i64 = DNN_TH },   0,       0,       FLAGS, .unit = "backend" },
     { "logit_scale",    "logit scale for similarity calculation",        OFFSET3(logit_scale),          AV_OPT_TYPE_FLOAT,  { .dbl = -1.0 },     -1.0,    100.0,   FLAGS },
-    { "temperature",    "softmax temperature",                           OFFSET3(temperature),          AV_OPT_TYPE_FLOAT,  { .dbl = 1.0 },      1,       100.0,   FLAGS },
+    { "temperature",    "softmax temperature",                           OFFSET3(temperature),          AV_OPT_TYPE_FLOAT,  { .dbl = -1.0 },     -1.0,       100.0,   FLAGS },
     { "forward_order",  "Order of forward output (0: media text, 1: text media) (CLIP/CLAP only)", OFFSET3(forward_order), AV_OPT_TYPE_BOOL,   { .i64 = -1 },     -1,      1,       FLAGS },
     { "normalize",      "Normalize the input tensor (CLIP/CLAP only)",   OFFSET3(normalize),            AV_OPT_TYPE_BOOL,   { .i64 = -1 },       -1,      1,       FLAGS },
     { "input_res",      "video processing model expected input size",    OFFSET3(input_resolution),     AV_OPT_TYPE_INT64,  { .i64 = -1 },       -1,      10000,   FLAGS },
@@ -412,7 +412,12 @@ static int read_classify_categories_file(AVFilterContext *context, CategoryClass
             current_category->total_probability = 0.0f;
         }
         // Must be a label
-        else if (line[0] != '\0' && current_category) {
+        else if (line[0] != '\0') {
+            if (!current_category) {
+                av_log(context, AV_LOG_ERROR, "Label found without category\n");
+                ret = AVERROR(EINVAL);
+                goto end;
+            }
             char *label = av_strdup(line);
             if (!label) {
                 ret = AVERROR(ENOMEM);
