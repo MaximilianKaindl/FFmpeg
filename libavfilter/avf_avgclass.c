@@ -1,20 +1,20 @@
 /*
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- */
+* This file is part of FFmpeg.
+*
+* FFmpeg is free software; you can redistribute it and/or
+* modify it under the terms of the GNU Lesser General Public
+* License as published by the Free Software Foundation; either
+* version 2.1 of the License, or (at your option) any later version.
+*
+* FFmpeg is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+* Lesser General Public License for more details.
+*
+* You should have received a copy of the GNU Lesser General Public
+* License along with FFmpeg; if not, write to the Free Software
+* Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+*/
 
 /**
  * @file
@@ -49,10 +49,9 @@ typedef struct StreamContext {
 
 typedef struct AvgClassContext {
     const AVClass *class;
-    unsigned nb_streams[TYPE_ALL]; /**< number of streams of each type */
+    unsigned nb_streams[TYPE_ALL]; // number of streams of each type
     char *output_file;
-    StreamContext *stream_ctx; /**< per-stream context */
-    int unsafe;                /**< flag for unsafe mode */
+    StreamContext *stream_ctx; // per-stream context
 } AvgClassContext;
 
 #define OFFSET(x) offsetof(AvgClassContext, x)
@@ -62,7 +61,6 @@ static const AVOption avgclass_options[] = {
     { "output_file", "path to output file for averages",    OFFSET(output_file),                    AV_OPT_TYPE_STRING, {.str = NULL},  0, 0,       FLAGS },
     { "v", "specify the number of video streams",           OFFSET(nb_streams[AVMEDIA_TYPE_VIDEO]), AV_OPT_TYPE_INT,    { .i64 = 1 },   0, INT_MAX, FLAGS },
     { "a", "specify the number of audio streams",           OFFSET(nb_streams[AVMEDIA_TYPE_AUDIO]), AV_OPT_TYPE_INT,    { .i64 = 0 },   0, INT_MAX, FLAGS },
-    { "unsafe", "enable unsafe mode",                       OFFSET(unsafe),                         AV_OPT_TYPE_BOOL,   { .i64 = 0 },   0, 1,       FLAGS },
     { NULL }
 };
 AVFILTER_DEFINE_CLASS(avgclass);
@@ -89,38 +87,69 @@ static ClassProb *find_or_create_class(StreamContext *stream_ctx, const char *la
     return &stream_ctx->class_probs[stream_ctx->nb_classes++];
 }
 
-static void write_averages_to_file(AVFilterContext *ctx)
+static void log_and_export_classification_averages(AVFilterContext *ctx)
 {
     AvgClassContext *s = ctx->priv;
-    FILE *f;
+    FILE *f = NULL;
     int stream_idx, i;
 
-    if (!s->output_file) {
-        av_log(ctx, AV_LOG_WARNING, "No output file specified, skipping average output\n");
-        return;
+    // Always log the results to console regardless of output file setting
+    av_log(ctx, AV_LOG_INFO, "Classification averages:\n");
+
+    // Try to open the output file if specified
+    if (s->output_file) {
+        f = avpriv_fopen_utf8(s->output_file, "w");
+        if (!f) {
+            av_log(ctx, AV_LOG_ERROR, "Could not open output file %s\n", s->output_file);
+            // Continue execution to at least log to console
+        } else {
+            av_log(ctx, AV_LOG_INFO, "Writing averages to CSV file: %s\n", s->output_file);
+            // Write CSV header
+            fprintf(f, "stream_id,label,avg_probability,count\n");
+        }
+    } else {
+        av_log(ctx, AV_LOG_INFO, "No output file specified, printing to log only\n");
     }
 
-    f = avpriv_fopen_utf8(s->output_file, "w");
-    if (!f) {
-        av_log(ctx, AV_LOG_ERROR, "Could not open output file %s\n", s->output_file);
-        return;
-    }
-
+    // Process all stream data
     for (stream_idx = 0; stream_idx < ctx->nb_inputs; stream_idx++) {
         StreamContext *stream_ctx = &s->stream_ctx[stream_idx];
 
-        fprintf(f, "Stream #%d:\n", stream_idx);
+        av_log(ctx, AV_LOG_INFO, "Stream #%d:\n", stream_idx);
+
+        // No results case
+        if (stream_ctx->nb_classes == 0) {
+            av_log(ctx, AV_LOG_INFO, "  No classification data found\n");
+            continue;
+        }
+
+        // Process each class
         for (i = 0; i < stream_ctx->nb_classes; i++) {
             double avg = stream_ctx->class_probs[i].count > 0
-                             ? stream_ctx->class_probs[i].sum / stream_ctx->class_probs[i].count
-                             : 0.0;
-            fprintf(f, "  %s:%.4f:%ld\n", stream_ctx->class_probs[i].label, avg, stream_ctx->class_probs[i].count);
-            av_log(ctx, AV_LOG_INFO, "Stream #%d, Label: %s: Average probability %.4f, Appeared %ld times\n",
-                   stream_idx, stream_ctx->class_probs[i].label, avg, stream_ctx->class_probs[i].count);
+                            ? stream_ctx->class_probs[i].sum / stream_ctx->class_probs[i].count
+                            : 0.0;
+
+            // Log to console
+            av_log(ctx, AV_LOG_INFO, "  Label: %s: Average probability %.4f, Appeared %ld times\n",
+                stream_ctx->class_probs[i].label, avg, stream_ctx->class_probs[i].count);
+
+            // Write to CSV file if available
+            if (f) {
+                // Handle CSV escaping for labels that might contain commas
+                if (strchr(stream_ctx->class_probs[i].label, ',')) {
+                    fprintf(f, "%d,\"%s\",%.4f,%ld\n", stream_idx, stream_ctx->class_probs[i].label, avg,
+                            stream_ctx->class_probs[i].count);
+                } else {
+                    fprintf(f, "%d,%s,%.4f,%ld\n", stream_idx, stream_ctx->class_probs[i].label, avg,
+                            stream_ctx->class_probs[i].count);
+                }
+            }
         }
     }
 
-    fclose(f);
+    // Close file if it was opened
+    if (f)
+        fclose(f);
 }
 
 static int process_frame(AVFilterContext *ctx, int stream_idx, AVFrame *frame)
@@ -147,7 +176,7 @@ static int process_frame(AVFilterContext *ctx, int stream_idx, AVFrame *frame)
         return 0;
     }
 
-    if (header->nb_bboxes <= 0 || header->nb_bboxes > 10000) {
+    if (header->nb_bboxes <= 0 || header->nb_bboxes > 100000) {
         av_log(ctx, AV_LOG_ERROR, "Invalid number or no bboxes\n");
         return 0;
     }
@@ -173,7 +202,7 @@ static int process_frame(AVFilterContext *ctx, int stream_idx, AVFrame *frame)
             // Check confidence values before division
             if (bbox->classify_confidences[j].den <= 0) {
                 av_log(ctx, AV_LOG_DEBUG, "Invalid confidence at bbox %d class %d: num=%d den=%d\n", i, j,
-                       bbox->classify_confidences[j].num, bbox->classify_confidences[j].den);
+                    bbox->classify_confidences[j].num, bbox->classify_confidences[j].den);
                 continue;
             }
 
@@ -191,7 +220,7 @@ static int process_frame(AVFilterContext *ctx, int stream_idx, AVFrame *frame)
                     continue;
                 }
                 av_log(ctx, AV_LOG_DEBUG, "Stream #%d, Label: %s, Confidence: %.6f\n", stream_idx,
-                       bbox->classify_labels[j], prob);
+                    bbox->classify_labels[j], prob);
             }
 
             class_prob = find_or_create_class(stream_ctx, bbox->classify_labels[j]);
@@ -220,7 +249,7 @@ static int query_formats(const AVFilterContext *ctx, AVFilterFormatsConfig **cfg
         for (str = 0; str < nb_str; str++) {
             idx = idx0;
 
-            /* Set the output formats */
+            // Set the output formats
             formats = ff_all_formats(type);
             if ((ret = ff_formats_ref(formats, &cfg_out[idx]->formats)) < 0)
                 return ret;
@@ -234,7 +263,7 @@ static int query_formats(const AVFilterContext *ctx, AVFilterFormatsConfig **cfg
                     return ret;
             }
 
-            /* Set the same formats for each corresponding input */
+            // Set the same formats for each corresponding input
             if ((ret = ff_formats_ref(formats, &cfg_in[idx]->formats)) < 0)
                 return ret;
 
@@ -258,12 +287,12 @@ static int config_output(AVFilterLink *outlink)
     AVFilterLink *inlink = ctx->inputs[out_no];
     FilterLink *inl = ff_filter_link(inlink);
 
-    outlink->time_base           = inlink->time_base;
-    outlink->w                   = inlink->w;
-    outlink->h                   = inlink->h;
+    outlink->time_base = inlink->time_base;
+    outlink->w = inlink->w;
+    outlink->h = inlink->h;
     outlink->sample_aspect_ratio = inlink->sample_aspect_ratio;
-    outlink->format              = inlink->format;
-    outl->frame_rate             = inl->frame_rate;
+    outlink->format = inlink->format;
+    outl->frame_rate = inl->frame_rate;
 
     return 0;
 }
@@ -292,7 +321,7 @@ static av_cold int avgclass_init(AVFilterContext *ctx)
     unsigned type, str;
     int ret;
 
-    /* create input pads */
+    // create input pads
     for (type = 0; type < TYPE_ALL; type++) {
         for (str = 0; str < s->nb_streams[type]; str++) {
             AVFilterPad pad = {
@@ -308,7 +337,7 @@ static av_cold int avgclass_init(AVFilterContext *ctx)
         }
     }
 
-    /* create output pads */
+    // create output pads
     for (type = 0; type < TYPE_ALL; type++) {
         for (str = 0; str < s->nb_streams[type]; str++) {
             AVFilterPad pad = {
@@ -321,7 +350,7 @@ static av_cold int avgclass_init(AVFilterContext *ctx)
         }
     }
 
-    /* allocate per-stream contexts */
+    // allocate per-stream contexts
     s->stream_ctx = av_calloc(ctx->nb_inputs, sizeof(*s->stream_ctx));
     if (!s->stream_ctx)
         return AVERROR(ENOMEM);
@@ -329,27 +358,56 @@ static av_cold int avgclass_init(AVFilterContext *ctx)
     return 0;
 }
 
-static av_cold void avgclass_uninit(AVFilterContext *ctx)
+static int flush_filter(AVFilterContext *ctx)
 {
-    AvgClassContext *s = ctx->priv;
     int i;
 
-    write_averages_to_file(ctx);
+    // Write current averages to file
+    log_and_export_classification_averages(ctx);
 
-    for (i = 0; i < ctx->nb_inputs; i++) {
-        av_freep(&s->stream_ctx[i].class_probs);
+    // Set EOF status on all outputs that haven't received it yet
+    for (i = 0; i < ctx->nb_outputs; i++) {
+        AVFilterLink *outlink = ctx->outputs[i];
+        int64_t pts = AV_NOPTS_VALUE;
+
+        // Only set EOF status if it hasn't been set already
+        if (!ff_outlink_get_status(outlink))
+            ff_outlink_set_status(outlink, AVERROR_EOF, pts);
     }
-    av_freep(&s->stream_ctx);
+
+    return 0;
 }
 
 static int avgclass_activate(AVFilterContext *ctx)
 {
-    int ret, status;
-    int64_t pts;
+    int ret, status, input_status;
+    int64_t pts, status_pts;
     AVFrame *in = NULL;
     unsigned i;
+    int all_inputs_eof = 1; // Flag to check if all inputs have reached EOF
 
-    /* Handle EOF on inputs */
+    // Forward status from outputs back to inputs (bidirectional EOF handling)
+    for (i = 0; i < ctx->nb_outputs; i++) {
+        AVFilterLink *outlink = ctx->outputs[i];
+        AVFilterLink *inlink = ctx->inputs[i];
+        int in_status;
+
+        status = ff_outlink_get_status(outlink);
+        // Check if we already acknowledged this input's EOF status
+        if (ff_inlink_acknowledge_status(inlink, &in_status, &pts)) {
+            // We just acknowledged the status
+            continue;
+        }
+
+        if (status == AVERROR_EOF) {
+            // Propagate EOF from output to corresponding input
+            ff_inlink_set_status(inlink, status);
+            av_log(ctx, AV_LOG_VERBOSE, "Propagating EOF from output %d to input %d\n", i, i);
+            return 0;
+        }
+    }
+
+    // Handle EOF on inputs
     for (i = 0; i < ctx->nb_inputs; i++) {
         AVFilterLink *inlink = ctx->inputs[i];
         AVFilterLink *outlink = ctx->outputs[i];
@@ -357,31 +415,51 @@ static int avgclass_activate(AVFilterContext *ctx)
         if (ff_inlink_acknowledge_status(inlink, &status, &pts)) {
             if (status == AVERROR_EOF) {
                 ff_outlink_set_status(outlink, status, pts);
+                av_log(ctx, AV_LOG_VERBOSE, "Input %d reached EOF\n", i);
                 continue;
             }
         }
 
-        /* Process frames */
+        // Check if this input is not at EOF by trying to get its status
+
+        if (!ff_inlink_acknowledge_status(inlink, &input_status, &status_pts) || input_status != AVERROR_EOF)
+            all_inputs_eof = 0;
+
+        // Process frames
         ret = ff_inlink_consume_frame(inlink, &in);
         if (ret < 0)
             return ret;
         if (ret > 0) {
-            /* Process the frame for classification data */
+            // Process the frame for classification data
             ret = process_frame(ctx, i, in);
             if (ret < 0) {
                 av_frame_free(&in);
                 return ret;
             }
 
-            /* Forward the frame to the corresponding output */
+            // Forward the frame to the corresponding output
             ret = ff_filter_frame(outlink, in);
             if (ret < 0)
                 return ret;
         }
 
-        /* Request more frames if needed */
-        if (ff_outlink_frame_wanted(outlink) && !ff_inlink_check_available_samples(inlink, 1))
-            ff_inlink_request_frame(inlink);
+        // Request more frames if needed
+        if (ff_outlink_frame_wanted(outlink) && !ff_inlink_check_available_samples(inlink, 1)) {
+            int input_status;
+            int64_t status_pts;
+            if (!ff_inlink_acknowledge_status(inlink, &input_status, &status_pts) || input_status != AVERROR_EOF) {
+                // Input is not at EOF, request more frames
+                ff_inlink_request_frame(inlink);
+            } else if (all_inputs_eof) {
+                // All inputs are at EOF, time to flush
+                return flush_filter(ctx);
+            }
+        }
+    }
+
+    // If all inputs have reached EOF and we haven't returned yet, flush now
+    if (all_inputs_eof) {
+        return flush_filter(ctx);
     }
 
     return FFERROR_NOT_READY;
@@ -390,11 +468,27 @@ static int avgclass_activate(AVFilterContext *ctx)
 static int process_command(AVFilterContext *ctx, const char *cmd, const char *args, char *res, int res_len, int flags)
 {
     if (!strcmp(cmd, "writeinfo")) {
-        write_averages_to_file(ctx);
+        log_and_export_classification_averages(ctx);
         return 0;
     }
 
+    if (!strcmp(cmd, "flush")) {
+        av_log(ctx, AV_LOG_VERBOSE, "Received flush command\n");
+        return flush_filter(ctx);
+    }
+
     return AVERROR(ENOSYS);
+}
+
+static av_cold void avgclass_uninit(AVFilterContext *ctx)
+{
+    AvgClassContext *s = ctx->priv;
+    int i;
+
+    for (i = 0; i < ctx->nb_inputs; i++) {
+        av_freep(&s->stream_ctx[i].class_probs);
+    }
+    av_freep(&s->stream_ctx);
 }
 
 const FFFilter ff_avf_avgclass = {
