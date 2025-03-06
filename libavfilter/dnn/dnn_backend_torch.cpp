@@ -477,8 +477,7 @@ static torch::Tensor calculate_similarity(torch::Tensor &tensor1, torch::Tensor 
     }
 }
 
-static torch::Tensor apply_softmax(torch::Tensor input_tensor, float temperature,const int *softmax_units, int softmax_units_count,
-                                   DnnContext *ctx)
+static torch::Tensor apply_softmax(torch::Tensor input_tensor, float temperature, const int *softmax_units, int softmax_units_count, DnnContext *ctx)
 {
     try {
         // Check for empty or invalid input tensor
@@ -508,7 +507,8 @@ static torch::Tensor apply_softmax(torch::Tensor input_tensor, float temperature
         for (int i = 0; i < softmax_units_count; i++) {
             int length = softmax_units[i];
             if (length <= 0 || offset + length > scaled_tensor.size(1)) {
-                continue;
+                av_log(ctx, AV_LOG_ERROR, "Invlid Softmax units were given to softmax. Index invalid or out of Bounds.\n");
+                return input_tensor;
             }
 
             // Apply softmax to the segment and directly place it in the result tensor
@@ -523,15 +523,16 @@ static torch::Tensor apply_softmax(torch::Tensor input_tensor, float temperature
         if (offset < scaled_tensor.size(1)) {
             result.slice(1, offset, scaled_tensor.size(1)) = scaled_tensor.slice(1, offset, scaled_tensor.size(1));
             // Copy remaining unprocessed elements without modification
-            av_log(ctx, AV_LOG_WARNING, "Some tensor elements (%d to %ld) were not processed by softmax\n", 
-                offset, scaled_tensor.size(1) - 1);
+            av_log(ctx, AV_LOG_ERROR, "Some tensor elements (%d to %ld) were not processed by softmax\n", offset,
+                   scaled_tensor.size(1) - 1);
         }
 
         return result;
     } catch (const c10::Error &e) {
-        if (ctx) {
-            av_log(ctx, AV_LOG_ERROR, "Error applying softmax: %s\n", e.what());
-        }
+        av_log(ctx, AV_LOG_ERROR, "Error applying softmax: %s\n", e.what());
+        return input_tensor; // Return original tensor on error
+    } catch (const std::exception &e) {
+        av_log(ctx, AV_LOG_ERROR, "Error applying softmax: %s\n", e.what());
         return input_tensor; // Return original tensor on error
     }
 }
