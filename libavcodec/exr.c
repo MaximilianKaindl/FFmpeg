@@ -190,7 +190,6 @@ typedef struct EXRContext {
 
     enum AVColorTransferCharacteristic apply_trc_type;
     float gamma;
-    union av_intfloat32 gamma_table[65536];
 
     uint8_t *offset_table;
 
@@ -1384,34 +1383,29 @@ static int decode_block(AVCodecContext *avctx, void *tdata,
                     s->compression == EXR_DWAA ||
                     s->compression == EXR_DWAB) {
                     // 32-bit
-                    union av_intfloat32 *ptr_x;
+                    uint8_t *ptr_x = ptr;
 
                     src = channel_buffer[c];
-                    ptr_x = (union av_intfloat32 *)ptr;
 
                     // Zero out the start if xmin is not 0
                     memset(ptr_x, 0, bxmin);
-                    ptr_x += window_xoffset;
+                    ptr_x += 4 * window_xoffset;
 
-                    union av_intfloat32 t;
                     if (trc_func && c < 3) {
-                        for (x = 0; x < xsize; x++) {
-                            t.i = bytestream_get_le32(&src);
-                            t.f = trc_func(t.f);
-                            *ptr_x++ = t;
+                        for (int x = 0; x < xsize; x++, ptr_x += 4) {
+                            float f = av_int2float(bytestream_get_le32(&src));
+                            AV_WN32A(ptr_x, av_float2int(trc_func(f)));
                         }
                     } else if (one_gamma != 1.f) {
-                        for (x = 0; x < xsize; x++) {
-                            t.i = bytestream_get_le32(&src);
-                            if (t.f > 0.0f && c < 3)  /* avoid negative values */
-                                t.f = powf(t.f, one_gamma);
-                            *ptr_x++ = t;
+                        for (int x = 0; x < xsize; x++, ptr_x += 4) {
+                            float f = av_int2float(bytestream_get_le32(&src));
+                            if (f > 0.0f && c < 3)  /* avoid negative values */
+                                f = powf(f, one_gamma);
+                            AV_WN32A(ptr_x, av_float2int(f));
                         }
                     } else {
-                        for (x = 0; x < xsize; x++) {
-                            t.i = bytestream_get_le32(&src);
-                            *ptr_x++ = t;
-                        }
+                        for (int x = 0; x < xsize; x++, ptr_x += 4)
+                            AV_WN32A(ptr_x, bytestream_get_le32(&src));
                     }
                     memset(ptr_x, 0, axmax);
                 } else if (s->pixel_type == EXR_HALF) {
@@ -2240,10 +2234,6 @@ static int decode_frame(AVCodecContext *avctx, AVFrame *picture,
 static av_cold int decode_init(AVCodecContext *avctx)
 {
     EXRContext *s = avctx->priv_data;
-    uint32_t i;
-    union av_intfloat32 t;
-    float one_gamma = 1.0f / s->gamma;
-    av_csp_trc_function trc_func = NULL;
 
     ff_init_half2float_tables(&s->h2f_tables);
 
@@ -2254,32 +2244,6 @@ static av_cold int decode_init(AVCodecContext *avctx)
 #if HAVE_BIGENDIAN
     ff_bswapdsp_init(&s->bbdsp);
 #endif
-
-    trc_func = av_csp_trc_func_from_id(s->apply_trc_type);
-    if (trc_func) {
-        for (i = 0; i < 65536; ++i) {
-            t.i = half2float(i, &s->h2f_tables);
-            t.f = trc_func(t.f);
-            s->gamma_table[i] = t;
-        }
-    } else {
-        if (one_gamma > 0.9999f && one_gamma < 1.0001f) {
-            for (i = 0; i < 65536; ++i) {
-                s->gamma_table[i].i = half2float(i, &s->h2f_tables);
-            }
-        } else {
-            for (i = 0; i < 65536; ++i) {
-                t.i = half2float(i, &s->h2f_tables);
-                /* If negative value we reuse half value */
-                if (t.f <= 0.0f) {
-                    s->gamma_table[i] = t;
-                } else {
-                    t.f = powf(t.f, one_gamma);
-                    s->gamma_table[i] = t;
-                }
-            }
-        }
-    }
 
     // allocate thread data, used for non EXR_RAW compression types
     s->thread_data = av_calloc(avctx->thread_count, sizeof(*s->thread_data));
