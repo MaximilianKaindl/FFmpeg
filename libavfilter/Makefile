@@ -286,7 +286,6 @@ OBJS-$(CONFIG_DILATION_FILTER)               += vf_neighbor.o
 OBJS-$(CONFIG_DILATION_OPENCL_FILTER)        += vf_neighbor_opencl.o opencl.o \
                                                 opencl/neighbor.o
 OBJS-$(CONFIG_DISPLACE_FILTER)               += vf_displace.o framesync.o
-OBJS-$(CONFIG_DNN_CLASSIFY_FILTER)           += avf_dnn_classify.o
 OBJS-$(CONFIG_DNN_DETECT_FILTER)             += vf_dnn_detect.o
 OBJS-$(CONFIG_DNN_PROCESSING_FILTER)         += vf_dnn_processing.o
 OBJS-$(CONFIG_DOUBLEWEAVE_FILTER)            += vf_weave.o
@@ -636,6 +635,7 @@ OBJS-$(CONFIG_APHASEMETER_FILTER)            += avf_aphasemeter.o
 OBJS-$(CONFIG_AVECTORSCOPE_FILTER)           += avf_avectorscope.o
 OBJS-$(CONFIG_AVGCLASS_FILTER)               += avf_avgclass.o
 OBJS-$(CONFIG_CONCAT_FILTER)                 += avf_concat.o
+OBJS-$(CONFIG_DNN_CLASSIFY_FILTER)           += avf_dnn_classify.o
 OBJS-$(CONFIG_SHOWCQT_FILTER)                += avf_showcqt.o lswsutils.o lavfutils.o
 OBJS-$(CONFIG_SHOWCWT_FILTER)                += avf_showcwt.o
 OBJS-$(CONFIG_SHOWFREQS_FILTER)              += avf_showfreqs.o

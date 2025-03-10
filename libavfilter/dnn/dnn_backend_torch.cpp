@@ -23,23 +23,22 @@
  * DNN Torch backend implementation.
  */
 
+#include <torch/torch.h>
+#include <torch/script.h>
+
 extern "C" {
 #include "../dnn_filter_common.h"
-#include "dnn_backend_common.h"
 #include "dnn_io_proc.h"
+#include "dnn_backend_common.h"
+#include "libavutil/opt.h"
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/detection_bbox.h"
 #include "libavutil/mem.h"
-#include "libavutil/opt.h"
 #include "queue.h"
 #include "safe_queue.h"
 }
-
-#include <torch/script.h>
-#include <torch/torch.h>
-
-#if (HAVE_LIBTORCH_CUDA == 1)
+#if (CONFIG_LIBTORCH_CUDA == 1)
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAStream.h>
 #endif
@@ -80,8 +79,7 @@ static const AVOption dnn_th_options[] = {
     { NULL }
 };
 
-static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Queue *lltask_queue,
-                                    DNNExecBaseParams *exec_params)
+static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Queue *lltask_queue, DNNExecBaseParams *exec_params)
 {
     THModel *th_model = (THModel *)task->model;
     DnnContext *ctx = th_model->ctx;
@@ -177,11 +175,11 @@ static void th_free_request(THInferRequest *request)
     if (!request)
         return;
     if (request->output) {
-        delete (request->output);
+        delete(request->output);
         request->output = NULL;
     }
     if (request->input_tensor) {
-        delete (request->input_tensor);
+        delete(request->input_tensor);
         request->input_tensor = NULL;
     }
     return;
@@ -201,7 +199,7 @@ static inline void destroy_request_item(THRequestItem **arg)
     av_freep(arg);
 }
 
-static void free_clip_context(THClxpContext *clxp_ctx)
+static void free_clxp_context(THClxpContext *clxp_ctx)
 {
     if (!clxp_ctx)
         return;
@@ -244,7 +242,7 @@ static void dnn_free_model_th(DNNModel **model)
     ff_queue_destroy(th_model->task_queue);
     delete th_model->jit_model;
 #if (CONFIG_LIBTOKENIZERS == 1)
-    free_clip_context(th_model->clxp_ctx);
+    free_clxp_context(th_model->clxp_ctx);
 #endif
     av_freep(&th_model);
     *model = NULL;
@@ -268,11 +266,9 @@ static void deleter(void *arg)
 }
 
 #if (CONFIG_LIBTOKENIZERS == 1)
-
 static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels, int label_count,
                                 const char *tokenizer_path, DnnContext *ctx, const c10::Device &device)
 {
-    // Early validation to avoid unnecessary processing
     if (!labels || label_count <= 0) {
         av_log(ctx, AV_LOG_ERROR, "Label file invalid.\n");
         return AVERROR(EINVAL);
@@ -327,23 +323,6 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels, int
 
     ff_dnn_tokenizer_free_results(results, label_count);
 
-    return 0;
-}
-
-static int copy_softmax_units(THModel *th_model, const int *softmax_units, int softmax_units_count)
-{
-    if (softmax_units && softmax_units_count > 0) {
-        th_model->clxp_ctx->softmax_units = (int *)av_malloc_array(softmax_units_count, sizeof(int));
-        if (!th_model->clxp_ctx->softmax_units) {
-            av_log(th_model->ctx, AV_LOG_ERROR, "Failed to allocate memory for softmax units\n");
-            return AVERROR(ENOMEM);
-        }
-        memcpy(th_model->clxp_ctx->softmax_units, softmax_units, softmax_units_count * sizeof(int));
-        th_model->clxp_ctx->softmax_units_count = softmax_units_count;
-    } else {
-        th_model->clxp_ctx->softmax_units = NULL;
-        th_model->clxp_ctx->softmax_units_count = 0;
-    }
     return 0;
 }
 
@@ -410,8 +389,7 @@ static int test_clip_inference(THModel *th_model, const c10::Device &device)
     return 0;
 }
 
-static int test_clap_inference(THModel *th_model, int64_t sample_rate, int64_t sample_duration,
-                                const c10::Device &device)
+static int test_clap_inference(THModel *th_model, int64_t sample_rate, int64_t sample_duration, const c10::Device &device)
 {
     try {
         // Create dummy audio tensor to test model compatibility
@@ -459,16 +437,29 @@ static int init_clxp_model(THModel *th_model, DNNFunctionType func_type, const c
 }
 #endif
 
-static torch::Tensor calculate_similarity(torch::Tensor &tensor1, torch::Tensor &tensor2, bool normalize,
-                                            float logit_scale, DnnContext *ctx)
+static int copy_softmax_units(THModel *th_model, const int *softmax_units, int softmax_units_count)
+{
+    if (softmax_units && softmax_units_count > 0) {
+        th_model->clxp_ctx->softmax_units = (int *)av_malloc_array(softmax_units_count, sizeof(int));
+        if (!th_model->clxp_ctx->softmax_units) {
+            av_log(th_model->ctx, AV_LOG_ERROR, "Failed to allocate memory for softmax units\n");
+            return AVERROR(ENOMEM);
+        }
+        memcpy(th_model->clxp_ctx->softmax_units, softmax_units, softmax_units_count * sizeof(int));
+        th_model->clxp_ctx->softmax_units_count = softmax_units_count;
+    } else {
+        th_model->clxp_ctx->softmax_units = NULL;
+        th_model->clxp_ctx->softmax_units_count = 0;
+    }
+    return 0;
+}
+
+static torch::Tensor calculate_similarity(torch::Tensor &tensor1, torch::Tensor &tensor2, bool normalize, float logit_scale, DnnContext *ctx)
 {
     try {
         if (normalize) {
-            tensor1 =
-                torch::nn::functional::normalize(tensor1, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
-
-            tensor2 =
-                torch::nn::functional::normalize(tensor2, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
+            tensor1 = torch::nn::functional::normalize(tensor1, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
+            tensor2 = torch::nn::functional::normalize(tensor2, torch::nn::functional::NormalizeFuncOptions().p(2).dim(-1));
         }
 
         // Compute similarity matrix
@@ -875,9 +866,7 @@ static void infer_completion_callback(void *args)
         }
         outputs.dims[0] = sizes[0]; // batch_size
         outputs.dims[1] = sizes[1]; // number of labels
-        outputs.order = th_model->model.func_type == DFT_ANALYTICS_CLIP
-                            ? DCO_RGB
-                            : DCO_NONE; // doesn't matter for similarity scores
+        outputs.order = th_model->model.func_type == DFT_ANALYTICS_CLIP ? DCO_RGB : DCO_NONE;
         outputs.dt = DNN_FLOAT;
     } else if (sizes.size() == 4 && th_model->model.func_type == DFT_PROCESS_FRAME) {
         // 4 dimensions: [batch_size, channel, height, width]
@@ -901,7 +890,7 @@ static void infer_completion_callback(void *args)
         try {
             single_output = output->select(0, i);
 
-            // Move to CPU if needed
+            // Post process can only deal with CPU memory.
             if (single_output.device() != torch::kCPU) {
                 single_output = single_output.to(torch::kCPU);
             }
@@ -1066,42 +1055,16 @@ static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilt
     model = &th_model->model;
     th_model->ctx = ctx;
 
-    if (ctx->torch_option.forward_order < 0) {
-        // set default value for forward_order
-        ctx->torch_option.forward_order = func_type == DFT_ANALYTICS_CLAP ? 1 : 0;
-        // Log the default value for forward_order
-        av_log(ctx, AV_LOG_INFO, "Using default forward_order=%d for %s input\n", ctx->torch_option.forward_order,
-                func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
-    }
-    if (ctx->torch_option.logit_scale <= 0) {
-        // set default value for logit_scale
-        ctx->torch_option.logit_scale = func_type == DFT_ANALYTICS_CLAP ? 33.37 : 4.6052;
-        // Log the default value for logit_scale
-        av_log(ctx, AV_LOG_INFO, "Using default logit_scale=%.4f for %s input\n", ctx->torch_option.logit_scale,
-                func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
-    }
-    if (ctx->torch_option.temperature <= 0) {
-        // set default value for logit_scale
-        ctx->torch_option.temperature = 1;
-        // Log the default value for logit_scale
-        av_log(ctx, AV_LOG_INFO, "Using default temperature=%.4f for %s input\n", ctx->torch_option.temperature,
-                func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
-    }
-    if (ctx->torch_option.normalize < 0) {
-        ctx->torch_option.normalize = func_type == DFT_ANALYTICS_CLAP ? 1 : 0;
-        // Log the default value for logit_scale
-        av_log(ctx, AV_LOG_INFO, "Using default normalize=%d for %s input\n", ctx->torch_option.normalize,
-                func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
-    }
-
     c10::Device device = c10::Device(device_name);
     if (device.is_xpu()) {
         if (!at::hasXPU()) {
             av_log(ctx, AV_LOG_ERROR, "No XPU device found\n");
             goto fail;
         }
+#if (CONFIG_LIBTORCH_CUDA == 0)
+        at::detail::getXPUHooks().initXPU();
+#else
         at::detail::getXPUHooks().init();
-#if (HAVE_LIBTORCH_CUDA == 1)
     } else if (device.is_cuda()) {
         if (!torch::cuda::is_available()) {
             av_log(ctx, AV_LOG_ERROR, "CUDA is not available!\n");
@@ -1145,7 +1108,6 @@ static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilt
         av_log(ctx, AV_LOG_ERROR, "Failed to load torch model\n");
         goto fail;
     }
-
     th_model->request_queue = ff_safe_queue_create();
     if (!th_model->request_queue) {
         goto fail;
@@ -1213,6 +1175,35 @@ static DNNModel *dnn_load_model_with_tokenizer_th(DnnContext *ctx, DNNFunctionTy
     if (th_model == NULL) {
         return NULL;
     }
+
+    if (ctx->torch_option.forward_order < 0) {
+        // set default value for forward_order
+        ctx->torch_option.forward_order = func_type == DFT_ANALYTICS_CLAP ? 1 : 0;
+        // Log the default value for forward_order
+        av_log(ctx, AV_LOG_INFO, "Using default forward_order=%d for %s input\n", ctx->torch_option.forward_order,
+                func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
+    }
+    if (ctx->torch_option.logit_scale <= 0) {
+        // set default value for logit_scale
+        ctx->torch_option.logit_scale = func_type == DFT_ANALYTICS_CLAP ? 33.37 : 4.6052;
+        // Log the default value for logit_scale
+        av_log(ctx, AV_LOG_INFO, "Using default logit_scale=%.4f for %s input\n", ctx->torch_option.logit_scale,
+                func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
+    }
+    if (ctx->torch_option.temperature <= 0) {
+        // set default value for logit_scale
+        ctx->torch_option.temperature = 1;
+        // Log the default value for logit_scale
+        av_log(ctx, AV_LOG_INFO, "Using default temperature=%.4f for %s input\n", ctx->torch_option.temperature,
+                func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
+    }
+    if (ctx->torch_option.normalize < 0) {
+        ctx->torch_option.normalize = func_type == DFT_ANALYTICS_CLAP ? 1 : 0;
+        // Log the default value for logit_scale
+        av_log(ctx, AV_LOG_INFO, "Using default normalize=%d for %s input\n", ctx->torch_option.normalize,
+                func_type == DFT_ANALYTICS_CLAP ? "audio" : "video");
+    }
+
 #if (CONFIG_LIBTOKENIZERS == 1)
     // Check if this is a CLXP model and initialize accordingly
     auto model = &th_model->model;

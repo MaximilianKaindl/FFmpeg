@@ -75,7 +75,7 @@ void *ff_dnn_filter_child_next(void *obj, void *prev)
     return ff_dnn_child_next(&base->dnnctx, prev);
 }
 
-int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
+static int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
 {
     DNNBackendType backend = ctx->backend_type;
 
@@ -95,8 +95,7 @@ int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext
 #if (CONFIG_LIBTOKENIZERS == 0)
         if ((func_type == DFT_ANALYTICS_CLIP || func_type == DFT_ANALYTICS_CLAP)) {
             av_log(ctx, AV_LOG_ERROR,
-                "tokenizers-cpp is not included. CLIP/CLAP Classification requires tokenizers-cpp library. Include "
-                "it with configure.\n");
+                "tokenizers-cpp is not included. CLIP/CLAP Classification requires tokenizers-cpp library. Include it with configure.\n");
             return AVERROR(EINVAL);
         }
 #endif
@@ -158,8 +157,7 @@ int ff_dnn_init(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *fil
 }
 
 int ff_dnn_init_with_tokenizer(DnnContext *ctx, DNNFunctionType func_type, char **labels, int label_count,
-                            int *softmax_units, int softmax_units_count, char *tokenizer_path,
-                            AVFilterContext *filter_ctx)
+                            int *softmax_units, int softmax_units_count, char *tokenizer_path, AVFilterContext *filter_ctx)
 {
     int ret = ff_dnn_init_priv(ctx, func_type, filter_ctx);
     if (ret < 0) {
@@ -291,8 +289,7 @@ void ff_dnn_uninit(DnnContext *ctx)
     }
 }
 
-static int load_file_content(const char *path, char **data, size_t *data_size,
-    void *log_ctx) {
+static int load_file_content(const char *path, char **data, size_t *data_size, void *log_ctx) {
     AVIOContext *avio_ctx = NULL;
     int ret;
     int64_t size;

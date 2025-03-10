@@ -54,7 +54,6 @@ void *ff_dnn_filter_child_next(void *obj, void *prev);
 
 int ff_dnn_filter_init_child_class(AVFilterContext *filter);
 
-int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx);
 int ff_dnn_init(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx);
 int ff_dnn_init_with_tokenizer(DnnContext *ctx, DNNFunctionType func_type, char** labels, int label_count, int* softmax_units, int softmax_units_count, char* tokenizer_path, AVFilterContext *filter_ctx);
 int ff_dnn_set_frame_proc(DnnContext *ctx, FramePrePostProc pre_proc, FramePrePostProc post_proc);
