@@ -19,7 +19,6 @@ show_help() {
 # Print bashrc variables
 print_bashrc() {
     # Get absolute paths
-    #TODO set paths to your installation directories
     ABSOLUTE_LIBTORCH_ROOT=$(realpath ${LIBTORCH_ROOT:-$(pwd)/../libtorch})
     ABSOLUTE_TOKENIZER_ROOT=$(realpath ${TOKENIZER_ROOT:-$(pwd)/../tokenizers-cpp})
     ABSOLUTE_OPENVINO_ROOT=$(realpath ${OPENVINO_ROOT:-/opt/intel/openvino})
@@ -45,6 +44,7 @@ print_bashrc() {
 }
 
 # Set up paths based on environment variables or defaults
+#TODO set paths to your installation directories
 LIBTORCH_ROOT=${LIBTORCH_ROOT:-$(pwd)/../libtorch}
 TOKENIZER_ROOT=${TOKENIZER_ROOT:-$(pwd)/../tokenizers-cpp}
 OPENVINO_ROOT=${OPENVINO_ROOT:-/opt/intel/openvino}
