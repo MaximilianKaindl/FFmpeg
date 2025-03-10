@@ -1,20 +1,20 @@
 /*
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- */
+* This file is part of FFmpeg.
+*
+* FFmpeg is free software; you can redistribute it and/or
+* modify it under the terms of the GNU Lesser General Public
+* License as published by the Free Software Foundation; either
+* version 2.1 of the License, or (at your option) any later version.
+*
+* FFmpeg is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+* Lesser General Public License for more details.
+*
+* You should have received a copy of the GNU Lesser General Public
+* License along with FFmpeg; if not, write to the Free Software
+* Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+*/
 
 /**
  * @file
@@ -54,17 +54,17 @@ typedef struct CategoryContext {
 } CategoryContext;
 
 /*
-   Header (Attribute) that is being described by all its labels.
-   (name) in labels file
+Header (Attribute) that is being described by all its labels.
+(name) in labels file
 
-   e.g.
-   (Comic)
-   a drawn image
-   a fictional character
-   ...
+e.g.
+(Comic)
+a drawn image
+a fictional character
+...
 
-   Can also be used to substitute the labeltext with the header text
-   so that the header is displayed instead of the label with the probability
+Can also be used to substitute the labeltext with the header text
+so that the header is displayed instead of the label with the probability
 */
 typedef struct CategoriesContext {
     char *name;
@@ -75,28 +75,28 @@ typedef struct CategoriesContext {
 } CategoriesContext;
 
 /*
-   Unit that is being classified. Each one can have multiple categories
-   [name] in categories file
+Unit that is being classified. Each one can have multiple categories
+[name] in categories file
 
-   e.g.
-   [RecordingSystem]
-   (Professional)
-   a photo with high level of detail
-   ...
-   (HomeRecording)
-   a photo with low level of detail
-   ...
+e.g.
+[RecordingSystem]
+(Professional)
+a photo with high level of detail
+...
+(HomeRecording)
+a photo with low level of detail
+...
 
-   empowers to do multiple classification "runs"
-   result per unit will be best category (rated by the sum over all confidence values) one of the categories
-   softmax is applied over each unit
+empowers to do multiple classification "runs"
+result per unit will be best category (rated by the sum over all confidence values) one of the categories
+softmax is applied over each unit
 */
 typedef struct CategoryClassifcationContext {
-   CategoriesContext **category_units;
-   int num_contexts;
-   int max_contexts;
-   int total_labels;
-   int total_categories;
+CategoriesContext **category_units;
+int num_contexts;
+int max_contexts;
+int total_labels;
+int total_categories;
 } CategoryClassifcationContext;
 
 typedef struct DnnClassifyContext {
@@ -224,6 +224,59 @@ static void free_category_classfication_context(CategoryClassifcationContext *ca
     }
 }
 
+static int detection_bbox_set_content(AVDetectionBBox *bbox, char *label, int index, float probability)
+{
+    // Set probability
+    bbox->classify_confidences[index] = av_make_q((int)(probability * 10000), 10000);
+
+    // Copy label with size checking
+    if (av_strlcpy(bbox->classify_labels[index], label, AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) >=
+        AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE) {
+        av_log(NULL, AV_LOG_WARNING, "Label truncated in set_prob_and_label_of_bbox\n");
+    }
+
+    return 0;
+}
+
+static fill_detection_bbox_with_best_labels(char **labels, float *probabilities, int num_labels, AVDetectionBBox *bbox, int max_classes_per_box, float confidence_threshold)
+{
+    int i, j, minpos, ret;
+    float min;
+
+    if (!labels || !probabilities || !bbox) {
+        return AVERROR(EINVAL);
+    }
+
+    for (i = 0; i < num_labels; i++) {
+        if (probabilities[i] >= confidence_threshold) {
+            if (bbox->classify_count >= max_classes_per_box) {
+                // Find lowest probability classification
+                min = av_q2d(bbox->classify_confidences[0]);
+                minpos = 0;
+                for (j = 1; j < bbox->classify_count; j++) {
+                    float prob = av_q2d(bbox->classify_confidences[j]);
+                    if (prob < min) {
+                        min = prob;
+                        minpos = j;
+                    }
+                }
+
+                if (probabilities[i] > min) {
+                    ret = detection_bbox_set_content(bbox, labels[i], minpos, probabilities[i]);
+                    if (ret < 0)
+                        return ret;
+                }
+            } else {
+                ret = detection_bbox_set_content(bbox, labels[i], bbox->classify_count, probabilities[i]);
+                if (ret < 0)
+                    return ret;
+                bbox->classify_count++;
+            }
+        }
+    }
+    return 0;
+}
+
 static int read_classify_label_file(AVFilterContext *context, LabelContext *label_classification_ctx,
                                     char *labels_filename, int max_line_length)
 {
@@ -284,7 +337,7 @@ static int read_classify_label_file(AVFilterContext *context, LabelContext *labe
 }
 
 static int read_classify_categories_file(AVFilterContext *context, CategoryClassifcationContext *cat_class_ctx,
-                                         char *categories_filename, int max_line_length)
+                                        char *categories_filename, int max_line_length)
 {
     FILE *file;
     char buf[256];
@@ -313,7 +366,7 @@ static int read_classify_categories_file(AVFilterContext *context, CategoryClass
 
         // Trim whitespace and newlines
         while (line_len > 0 &&
-               (line[line_len - 1] == '\n' || line[line_len - 1] == '\r' || line[line_len - 1] == ' ')) {
+            (line[line_len - 1] == '\n' || line[line_len - 1] == '\r' || line[line_len - 1] == ' ')) {
             line[--line_len] = '\0';
         }
 
@@ -425,7 +478,7 @@ static int read_classify_categories_file(AVFilterContext *context, CategoryClass
             }
 
             if (av_dynarray_add_nofree(&current_category->labels->labels, &current_category->labels->label_count,
-                                       label) < 0) {
+                                    label) < 0) {
                 av_freep(&label);
                 ret = AVERROR(ENOMEM);
                 goto end;
@@ -551,7 +604,7 @@ static CategoryContext *get_best_category(CategoriesContext *categories_ctx, flo
 }
 
 static AVDetectionBBox *find_or_create_detection_bbox(AVFrame *frame, uint32_t bbox_index, AVFilterContext *filter_ctx,
-                                                      DnnClassifyContext *ctx)
+                                                    DnnClassifyContext *ctx)
 {
     AVFrameSideData *sd;
     AVDetectionBBoxHeader *header;
@@ -631,10 +684,10 @@ static int post_proc_standard(AVFrame *frame, DNNData *output, uint32_t bbox_ind
 
     if (ctx->label_classification_ctx->labels && label_id < ctx->label_classification_ctx->label_count) {
         av_strlcpy(bbox->classify_labels[bbox->classify_count], ctx->label_classification_ctx->labels[label_id],
-                   sizeof(bbox->classify_labels[bbox->classify_count]));
+                sizeof(bbox->classify_labels[bbox->classify_count]));
     } else {
         snprintf(bbox->classify_labels[bbox->classify_count], sizeof(bbox->classify_labels[bbox->classify_count]), "%d",
-                 label_id);
+                label_id);
     }
     bbox->classify_count++;
 
@@ -656,8 +709,8 @@ static int post_proc_clxp_labels(AVFrame *frame, DNNData *output, uint32_t bbox_
         return AVERROR(EINVAL);
     }
 
-    ret = av_detection_bbox_fill_with_best_labels(ctx->label_classification_ctx->labels, probabilities, num_labels,
-                                                  bbox, max_classes_per_box, confidence_threshold);
+    ret = fill_detection_bbox_with_best_labels(ctx->label_classification_ctx->labels, probabilities, num_labels,
+                                                bbox, max_classes_per_box, confidence_threshold);
     if (ret < 0) {
         av_log(filter_ctx, AV_LOG_ERROR, "Failed to fill bbox with best labels\n");
         return ret;
@@ -732,8 +785,8 @@ static int post_proc_clxp_categories(AVFrame *frame, DNNData *output, uint32_t b
     }
 
     // Fill bbox with best labels
-    ret = av_detection_bbox_fill_with_best_labels(ctx_labels, ctx_probabilities, cat_class_ctx->num_contexts, bbox,
-                                                  AV_NUM_DETECTION_BBOX_CLASSIFY, ctx->confidence);
+    ret = fill_detection_bbox_with_best_labels(ctx_labels, ctx_probabilities, cat_class_ctx->num_contexts, bbox,
+                                                AV_NUM_DETECTION_BBOX_CLASSIFY, ctx->confidence);
 
     // Clean up
     for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
@@ -838,14 +891,14 @@ static int config_input(AVFilterLink *inlink)
                 return AVERROR(ENOMEM);
 
             ret = read_classify_label_file(context, ctx->label_classification_ctx, ctx->labels_filename,
-                                           AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+                                        AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
             if (ret < 0) {
                 av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
                 return ret;
             }
             ret = ff_dnn_init_with_tokenizer(&ctx->dnnctx, goal_mode, ctx->label_classification_ctx->labels,
-                                             ctx->label_classification_ctx->label_count, NULL, 0, ctx->tokenizer_path,
-                                             context);
+                                            ctx->label_classification_ctx->label_count, NULL, 0, ctx->tokenizer_path,
+                                            context);
             if (ret < 0) {
                 free_contexts(ctx);
                 return ret;
@@ -882,8 +935,8 @@ static int config_input(AVFilterLink *inlink)
 
             // Initialize DNN with tokenizer for CLIP/CLAP models
             ret = ff_dnn_init_with_tokenizer(&ctx->dnnctx, goal_mode, ctx->label_classification_ctx->labels,
-                                             ctx->label_classification_ctx->label_count, label_counts, total_labels,
-                                             ctx->tokenizer_path, context);
+                                            ctx->label_classification_ctx->label_count, label_counts, total_labels,
+                                            ctx->tokenizer_path, context);
             if (ret < 0) {
                 av_freep(&label_counts);
                 free_contexts(ctx);
@@ -903,7 +956,7 @@ static int config_input(AVFilterLink *inlink)
             return AVERROR(ENOMEM);
 
         ret = read_classify_label_file(context, ctx->label_classification_ctx, ctx->labels_filename,
-                                       AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+                                    AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
         if (ret < 0) {
             av_log(context, AV_LOG_ERROR, "Failed to read labels file\n");
             free_contexts(ctx);
@@ -981,9 +1034,9 @@ static av_cold int dnn_classify_init(AVFilterContext *context)
 }
 
 static const enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_RGB24,   AV_PIX_FMT_BGR24,   AV_PIX_FMT_GRAY8,
-                                              AV_PIX_FMT_GRAYF32, AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
-                                              AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
-                                              AV_PIX_FMT_NV12,    AV_PIX_FMT_NONE};
+                                            AV_PIX_FMT_GRAYF32, AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
+                                            AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
+                                            AV_PIX_FMT_NV12,    AV_PIX_FMT_NONE};
 
 static const enum AVSampleFormat sample_fmts[] = {AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_NONE};
 
@@ -1126,7 +1179,7 @@ static int process_audio_buffer(DnnClassifyContext *ctx, AVFilterLink *inlink)
                 continue;
             }
             memcpy((float *)audio_buffer->data[ch] + buffer_offset, (float *)in->data[ch],
-                   samples_to_copy * sizeof(float));
+                samples_to_copy * sizeof(float));
         }
 
         buffer_offset += samples_to_copy;

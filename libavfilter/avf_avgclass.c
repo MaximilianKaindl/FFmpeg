@@ -129,7 +129,6 @@ static void log_and_export_classification_averages(AVFilterContext *ctx)
                             ? stream_ctx->class_probs[i].sum / stream_ctx->class_probs[i].count
                             : 0.0;
 
-            // Log to console
             av_log(ctx, AV_LOG_INFO, "  Label: %s: Average probability %.4f, Appeared %ld times\n",
                 stream_ctx->class_probs[i].label, avg, stream_ctx->class_probs[i].count);
 
@@ -421,7 +420,6 @@ static int avgclass_activate(AVFilterContext *ctx)
         }
 
         // Check if this input is not at EOF by trying to get its status
-
         if (!ff_inlink_acknowledge_status(inlink, &input_status, &status_pts) || input_status != AVERROR_EOF)
             all_inputs_eof = 0;
 

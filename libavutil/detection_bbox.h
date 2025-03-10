@@ -105,13 +105,4 @@ AVDetectionBBoxHeader *av_detection_bbox_alloc(uint32_t nb_bboxes, size_t *out_s
  * AV_FRAME_DATA_DETECTION_BBOXES and initializes the variables.
  */
 AVDetectionBBoxHeader *av_detection_bbox_create_side_data(AVFrame *frame, uint32_t nb_bboxes);
-
-
-int av_detection_bbox_fill_with_best_labels(char **labels, float *probabilities,
-    int num_labels, AVDetectionBBox *bbox,
-    int max_classes_per_box,
-    float confidence_threshold);
-
-int av_detection_bbox_set_content(AVDetectionBBox *bbox, char *label, int index,
-        float probability);
 #endif

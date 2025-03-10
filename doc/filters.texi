@@ -30815,6 +30815,70 @@ bench=start,selectivecolor=reds=-.2 .12 -.49,bench=stop
 @end example
 @end itemize
 
+@section avgclass
+
+Average classification probabilities across multiple frames for both audio and video streams.
+
+This filter analyzes classification data from frame side data (bounding boxes) and calculates average confidence scores for each label. The filter processes classification metadata from the @code{dnn_classify} filter or other sources that generate AVDetectionBBox side data, computing averages over the entire stream.
+
+At the end of the stream (or when manually triggered), the filter outputs the average probability for each detected class, both to console logs and optionally to a CSV file.
+
+@table @option
+@item output_file
+Path to a CSV output file where average classification results will be written. If not specified, results are only printed to log output.
+
+@item v
+Specify the number of video streams (default: 1).
+
+@item a
+Specify the number of audio streams (default: 0).
+@end table
+
+This filter supports the following commands:
+
+@table @option
+@item writeinfo
+Immediately write current average classification results to the log and output file (if specified) without waiting for the stream to end.
+
+@item flush
+Force the filter to write results and flush all its internal state.
+@end table
+
+@subsection Examples
+
+Process a video with object detection and classification, then calculate average classification probabilities:
+@example
+ffmpeg -i input.mp4 -vf "dnn_detect=model=detection.xml:input=data:output=detection_out:confidence=0.5,dnn_classify=model=classification.pt:dnn_backend=torch:tokenizer=tokenizer.json:labels=labels.txt,avgclass=output_file=results.csv" -f null -
+@end example
+
+Process both audio and video classification:
+@example
+ffmpeg -i input.mkv -filter_complex "[0:v]dnn_classify[v0]; [0:a]aformat=sample_fmts=fltp,dnn_classify=dnn_backend=torch:model=clap_model.pt:is_audio=1:tokenizer=tokenizer.json:labels=audio_labels.txt[a0]; [v0][a0]avgclass=v=1:a=1:output_file=av_results.csv" -f null -
+@end example
+
+@subsection Output Format
+
+When the filter completes processing (or when the @code{writeinfo} command is sent), it outputs classification results in this format:
+
+@example
+Classification averages:
+Stream #0:
+  Label: cat: Average probability 0.8765, Appeared 120 times
+  Label: dog: Average probability 0.3421, Appeared 42 times
+Stream #1:
+  Label: music: Average probability 0.9823, Appeared 315 times
+  Label: speech: Average probability 0.1245, Appeared 15 times
+@end example
+
+If an output file is specified, the same data is written in CSV format:
+@example
+stream_id,label,avg_probability,count
+0,cat,0.8765,120
+0,dog,0.3421,42
+1,music,0.9823,315
+1,speech,0.1245,15
+@end example
+
 @section concat
 
 Concatenate audio and video streams, joining them together one after the
@@ -31981,6 +32045,91 @@ Set the default timebase value:
 settb=AVTB
 @end example
 @end itemize
+
+@section dnn_classify
+Analyze media (video frames or audio) using deep neural networks to apply classifications based on the content.
+This filter supports three classification modes:
+
+@itemize @bullet
+@item Standard image classification (OpenVINO backend)
+@item CLIP (Contrastive Language-Image Pre-training) classification (Torch backend)
+@item CLAP (Contrastive Language-Audio Pre-training) classification (Torch backend)
+@end itemize
+
+The filter accepts the following options:
+@table @option
+@item dnn_backend
+Specify which DNN backend to use for model loading and execution. Currently supports:
+@table @samp
+@item openvino
+Use OpenVINO backend (standard image classification only).
+@item torch
+Use LibTorch backend (supports CLIP for images and CLAP for audio).
+@end table
+@item confidence
+Set the confidence threshold (default: 0.5). Classifications with confidence below this value will be filtered out.
+@item labels
+Set path to a label file specifying classification labels. This is required for standard classification and can be used for CLIP/CLAP classification.
+Each label is written on a separate line in the file. Trailing spaces and empty lines are skipped.
+@item categories
+Path to a categories file for hierarchical classification (CLIP/CLAP only). This allows classification to be organized into multiple category units with individual categories containing related labels.
+@item tokenizer
+Path to the text tokenizer.json file (CLIP/CLAP only). Required for text embedding generation.
+@item target
+Specify which objects to classify. When omitted, the entire frame is classified. When specified, only bounding boxes with detection labels matching this value are classified.
+@item is_audio
+Enable audio processing mode for CLAP models (default: 0). Set to 1 to process audio input instead of video frames.
+@item logit_scale
+Logit scale for similarity calculation in CLIP/CLAP (default: 4.6052 for CLIP, 33.37 for CLAP). Values below 0 use the default.
+@item temperature
+Softmax temperature for CLIP/CLAP models (default: 1.0). Lower values make the output more peaked, higher values make it smoother.
+@item forward_order
+Order of forward output for CLIP/CLAP: 0 for media-text order, 1 for text-media order (default depends on model type).
+@item normalize
+Whether to normalize the input tensor for CLIP/CLAP (default depends on model type). Some scripted models already do this in the forward, so this is not necessary in some cases.
+@item input_res
+Expected input resolution for video processing models (default: automatically detected).
+@item sample_rate
+Expected sample rate for audio processing models (default: 44100).
+@item sample_duration
+Expected sample duration in seconds for audio processing models (default: 7).
+@item token_dimension
+Dimension of token vector for text embeddings (default: 77).
+@item optimize
+Enable graph executor optimization (0: disabled, 1: enabled).
+@end table
+@subsection Category Files Format
+For CLIP/CLAP models, a hierarchical categories file can be provided with the following format:
+@example
+[RecordingSystem]
+(Professional)
+a photo with high level of detail
+a professionally recorded sound
+(HomeRecording)
+a photo with low level of detail
+an amateur recording
+[ContentType]
+(Nature)
+trees
+mountains
+birds singing
+(Urban)
+buildings
+street noise
+traffic sounds
+@end example
+Each unit enclosed in square brackets [] creates a classification group. Within each group, categories are defined with parentheses () and the labels under each category are used to classify the input.
+@subsection Examples
+@example
+Classify video using OpenVINO
+ffmpeg -i input.mp4 -vf "dnn_classify=dnn_backend=openvino:model=model.xml:labels=labels.txt" output.mp4
+Classify video using CLIP
+ffmpeg -i input.mp4 -vf "dnn_classify=dnn_backend=torch:model=clip_model.pt:categories=categories.txt:tokenizer=tokenizer.json" output.mp4
+Classify only person objects in a video
+ffmpeg -i input.mp4 -vf "dnn_detect=model=detection.xml:input=data:output=detection_out:confidence=0.5,dnn_classify=model=clip_model.pt:dnn_backend=torch:tokenizer=tokenizer.json:labels=labels.txt:target=person" output.mp4
+Classify audio using CLAP
+ffmpeg -i input.mp3 -af "dnn_classify=dnn_backend=torch:model=clap_model.pt:categories=audio_categories.txt:tokenizer=tokenizer.json:is_audio=1:sample_rate=44100:sample_duration=7" output.mp3
+@end example
 
 @section showcqt
 Convert input audio to a video output representing frequency spectrum

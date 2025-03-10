@@ -1,28 +1,26 @@
 /*
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- */
+* This file is part of FFmpeg.
+*
+* FFmpeg is free software; you can redistribute it and/or
+* modify it under the terms of the GNU Lesser General Public
+* License as published by the Free Software Foundation; either
+* version 2.1 of the License, or (at your option) any later version.
+*
+* FFmpeg is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+* Lesser General Public License for more details.
+*
+* You should have received a copy of the GNU Lesser General Public
+* License along with FFmpeg; if not, write to the Free Software
+* Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+*/
 
 #include "dnn_filter_common.h"
 #include "libavutil/avstring.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavformat/avio.h"
-#include "libavutil/error.h"
-#include "libavutil/log.h"
 
 #if (CONFIG_LIBTOKENIZERS == 1)
 #include "tokenizers_c.h"
@@ -76,7 +74,9 @@ void *ff_dnn_filter_child_next(void *obj, void *prev)
     DnnFilterBase *base = obj;
     return ff_dnn_child_next(&base->dnnctx, prev);
 }
-int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx){
+
+int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
+{
     DNNBackendType backend = ctx->backend_type;
 
     if (!ctx->model_filename) {
@@ -87,17 +87,19 @@ int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext
     if (backend == DNN_TH) {
         if (ctx->model_inputname)
             av_log(filter_ctx, AV_LOG_WARNING, "LibTorch backend do not require inputname, "\
-                                               "inputname will be ignored.\n");
+                                                "inputname will be ignored.\n");
         if (ctx->model_outputnames)
             av_log(filter_ctx, AV_LOG_WARNING, "LibTorch backend do not require outputname(s), "\
-                                               "all outputname(s) will be ignored.\n");
+                                            "all outputname(s) will be ignored.\n");
 
-        #if (CONFIG_LIBTOKENIZERS == 0)
-        if((func_type == DFT_ANALYTICS_CLIP || func_type == DFT_ANALYTICS_CLAP)){
-            av_log(ctx, AV_LOG_ERROR, "tokenizers-cpp is not included. CLIP/CLAP Classification requires tokenizers-cpp library. Include it with configure.\n");
+#if (CONFIG_LIBTOKENIZERS == 0)
+        if ((func_type == DFT_ANALYTICS_CLIP || func_type == DFT_ANALYTICS_CLAP)) {
+            av_log(ctx, AV_LOG_ERROR,
+                "tokenizers-cpp is not included. CLIP/CLAP Classification requires tokenizers-cpp library. Include "
+                "it with configure.\n");
             return AVERROR(EINVAL);
         }
-        #endif
+#endif
         ctx->nb_outputs = 1;
     } else if (backend == DNN_TF) {
         if (!ctx->model_inputname) {
@@ -125,14 +127,14 @@ int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext
         void *child = NULL;
 
         av_log(filter_ctx, AV_LOG_WARNING,
-               "backend_configs is deprecated, please set backend options directly\n");
+                "backend_configs is deprecated, please set backend options directly\n");
         while (child = ff_dnn_child_next(ctx, child)) {
             if (*(const AVClass **)child == &ctx->dnn_module->clazz) {
                 int ret = av_opt_set_from_string(child, ctx->backend_options,
-                                                 NULL, "=", "&");
+                                                NULL, "=", "&");
                 if (ret < 0) {
                     av_log(filter_ctx, AV_LOG_ERROR, "failed to parse options \"%s\"\n",
-                           ctx->backend_options);
+                            ctx->backend_options);
                     return ret;
                 }
             }
@@ -140,7 +142,6 @@ int ff_dnn_init_priv(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext
     }
     return 0;
 }
-
 
 int ff_dnn_init(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
 {
@@ -156,12 +157,16 @@ int ff_dnn_init(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *fil
     return 0;
 }
 
-int ff_dnn_init_with_tokenizer(DnnContext *ctx, DNNFunctionType func_type, char** labels, int label_count, int* softmax_units, int softmax_units_count, char* tokenizer_path, AVFilterContext *filter_ctx){
+int ff_dnn_init_with_tokenizer(DnnContext *ctx, DNNFunctionType func_type, char **labels, int label_count,
+                            int *softmax_units, int softmax_units_count, char *tokenizer_path,
+                            AVFilterContext *filter_ctx)
+{
     int ret = ff_dnn_init_priv(ctx, func_type, filter_ctx);
     if (ret < 0) {
         return ret;
     }
-    ctx->model = (ctx->dnn_module->load_model_with_tokenizer)(ctx, func_type, labels, label_count, softmax_units, softmax_units_count, tokenizer_path, filter_ctx);
+    ctx->model = (ctx->dnn_module->load_model_with_tokenizer)(ctx, func_type, labels, label_count, softmax_units,
+                                                            softmax_units_count, tokenizer_path, filter_ctx);
     if (!ctx->model) {
         av_log(filter_ctx, AV_LOG_ERROR, "could not load DNN model\n");
         return AVERROR(EINVAL);
@@ -196,9 +201,9 @@ int ff_dnn_get_input(DnnContext *ctx, DNNData *input)
 int ff_dnn_get_output(DnnContext *ctx, int input_width, int input_height, int *output_width, int *output_height)
 {
     char * output_name = ctx->model_outputnames && ctx->backend_type != DNN_TH ?
-                         ctx->model_outputnames[0] : NULL;
+                        ctx->model_outputnames[0] : NULL;
     return ctx->model->get_output(ctx->model, ctx->model_inputname, input_width, input_height,
-                                  (const char *)output_name, output_width, output_height);
+                                (const char *)output_name, output_width, output_height);
 }
 
 int ff_dnn_execute_model(DnnContext *ctx, AVFrame *in_frame, AVFrame *out_frame)
@@ -338,7 +343,8 @@ static int load_file_content(const char *path, char **data, size_t *data_size,
 }
 
 #if (CONFIG_LIBTOKENIZERS == 1)
-TokenizerHandle ff_dnn_tokenizer_create(const char *path, void *log_ctx) {
+TokenizerHandle ff_dnn_tokenizer_create(const char *path, void *log_ctx)
+{
     char *blob = NULL;
     size_t blob_size = 0;
     TokenizerHandle handle = NULL;
@@ -363,9 +369,9 @@ TokenizerHandle ff_dnn_tokenizer_create(const char *path, void *log_ctx) {
     return handle;
 }
 
-int ff_dnn_tokenizer_encode_batch(TokenizerHandle tokenizer, const char **texts,
-                                  int text_count, TokenizerEncodeResult **results,
-                                  void *log_ctx) {
+int ff_dnn_tokenizer_encode_batch(TokenizerHandle tokenizer, const char **texts, int text_count,
+                                TokenizerEncodeResult **results, void *log_ctx)
+{
     size_t *lengths = NULL;
     int ret = 0;
 
@@ -400,7 +406,7 @@ int ff_dnn_tokenizer_encode_batch(TokenizerHandle tokenizer, const char **texts,
 
     // Tokenize all texts in batch - directly store results in the output array
     tokenizers_encode_batch(tokenizer, texts, lengths, text_count, 1, *results);
-    
+
     av_freep(&lengths);
     return 0;
 
@@ -410,10 +416,9 @@ fail:
     return ret;
 }
 
-int ff_dnn_create_tokenizer_and_encode_batch(const char *path,
-                                             const char **texts, int text_count,
-                                             TokenizerEncodeResult **results,
-                                             void *log_ctx) {
+int ff_dnn_create_tokenizer_and_encode_batch(const char *path, const char **texts, int text_count,
+                                            TokenizerEncodeResult **results, void *log_ctx)
+{
     int ret;
 
     // Create tokenizer
