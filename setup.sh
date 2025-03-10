@@ -2,15 +2,17 @@
 
 # Print help message
 show_help() {
-    echo "Usage: $0 [OPTION]"
+    echo "Usage: $0 [OPTION]..."
     echo "Configure FFmpeg build environment with various dependencies."
     echo
     echo "Options:"
-    echo "  --help       Show this help message"
-    echo "  --openvino   Include OpenVINO support"
-    echo "  --all        Include all dependencies (OpenVINO, CUDA, and additional codecs)"
-    echo "  --print-bashrc  Print lines to add to your .bashrc file"
+    echo "  --help            Show this help message"
+    echo "  --openvino        Include OpenVINO support"
+    echo "  --cuda            Use LibTorch with CUDA support"
+    echo "  --all             Include all dependencies (OpenVINO, CUDA, and additional codecs)"
+    echo "  --print-bashrc    Print lines to add to your .bashrc file"
     echo
+    echo "Multiple options can be specified together (e.g., --openvino --cuda)"
     echo "No arguments will configure for basic LibTorch and Tokenizers support only."
 }
 
@@ -50,37 +52,41 @@ OPENVINO_ROOT=${OPENVINO_ROOT:-/opt/intel/openvino}
 # Parse command line arguments
 USE_OPENVINO=0
 USE_ALL=0
+USE_CUDA=0
 
-if [ "$#" -gt 1 ]; then
-    echo "Error: Too many arguments"
-    show_help
-    exit 1
+# Allow multiple arguments
+if [ "$#" -gt 0 ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            --help)
+                show_help
+                exit 0
+                ;;
+            --openvino)
+                USE_OPENVINO=1
+                ;;
+            --cuda)
+                USE_CUDA=1
+                ;;
+            --all)
+                USE_ALL=1
+                USE_OPENVINO=1  # --all includes OpenVINO
+                USE_CUDA=1      # --all includes CUDA
+                ;;
+            --print-bashrc)
+                print_bashrc
+                exit 0
+                ;;
+            *)
+                echo "Error: Unknown option: $arg"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
 fi
 
-if [ "$#" -eq 1 ]; then
-    case "$1" in
-        --help)
-            show_help
-            exit 0
-            ;;
-        --openvino)
-            USE_OPENVINO=1
-            ;;
-        --all)
-            USE_ALL=1
-            USE_OPENVINO=1  # --all includes OpenVINO
-            ;;
-        --print-bashrc)
-            print_bashrc
-            exit 0
-            ;;
-        *)
-            echo "Error: Unknown option: $1"
-            show_help
-            exit 1
-            ;;
-    esac
-fi
+# The multi-argument handling is now done above
 
 # Setup path variables
 setup_paths() {
@@ -143,9 +149,16 @@ verify_directories() {
 # Generate configuration flags
 generate_config_flags() {
     # Base configuration with LibTorch and Tokenizers
-    CONFIG_FLAGS="--enable-debug --enable-libtorch --enable-libtokenizers"
+    CONFIG_FLAGS="--enable-debug --enable-libtokenizers"
     EXTRA_CFLAGS="-I$LIBTORCH_HEADER -I$LIBTORCH_HEADER_CSRC -I$TOKENIZER_HEADER"
     EXTRA_LDFLAGS="-L$LIBTORCH_LIB -L$TOKENIZER_LIB"
+    
+    # Configure LibTorch with or without CUDA
+    if [[ $USE_CUDA -eq 1 ]]; then
+        CONFIG_FLAGS="$CONFIG_FLAGS --enable-libtorch_cuda"
+    else
+        CONFIG_FLAGS="$CONFIG_FLAGS --enable-libtorch"
+    fi
 
     if [[ $USE_OPENVINO -eq 1 ]]; then
         CONFIG_FLAGS="$CONFIG_FLAGS --enable-libopenvino"
@@ -187,8 +200,12 @@ main() {
     echo "FFmpeg Configuration Summary:"
     if [[ $USE_ALL -eq 1 ]]; then
         echo "- Mode: Full configuration with all dependencies"
+    elif [[ $USE_OPENVINO -eq 1 && $USE_CUDA -eq 1 ]]; then
+        echo "- Mode: LibTorch with CUDA, Tokenizers, and OpenVINO"
     elif [[ $USE_OPENVINO -eq 1 ]]; then
         echo "- Mode: LibTorch, Tokenizers, and OpenVINO"
+    elif [[ $USE_CUDA -eq 1 ]]; then
+        echo "- Mode: LibTorch with CUDA and Tokenizers"
     else
         echo "- Mode: Basic (LibTorch and Tokenizers only)"
     fi
