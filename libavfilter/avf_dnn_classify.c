@@ -761,7 +761,8 @@ static int post_proc_clxp_categories(AVFrame *frame, DNNData *output, uint32_t b
         av_freep(&ctx_labels);
         return AVERROR(ENOMEM);
     }
-
+    
+    int category_count = 0;
     // Process each context
     for (int ctx_idx = 0; ctx_idx < cat_class_ctx->num_contexts; ctx_idx++) {
         CategoriesContext *categories_ctx = cat_class_ctx->category_units[ctx_idx];
@@ -773,20 +774,22 @@ static int post_proc_clxp_categories(AVFrame *frame, DNNData *output, uint32_t b
         // Find best category in context
         best_category = get_best_category(categories_ctx, probabilities + prob_offset);
         if (!best_category || !best_category->name) {
-            av_log(filter_ctx, AV_LOG_ERROR, "Invalid best category at context %d\n", ctx_idx);
+            // No category classification found
             continue;
         }
 
         // Copy category name instead of assigning pointer
-        av_strlcpy(ctx_labels[ctx_idx], best_category->name, AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
-        ctx_probabilities[ctx_idx] = best_category->total_probability;
+        av_strlcpy(ctx_labels[category_count], best_category->name, AV_DETECTION_BBOX_LABEL_NAME_MAX_SIZE);
+        ctx_probabilities[category_count] = best_category->total_probability;
 
         prob_offset += categories_ctx->label_count;
+        category_count++;
     }
-
-    // Fill bbox with best labels
-    ret = fill_detection_bbox_with_best_labels(ctx_labels, ctx_probabilities, cat_class_ctx->num_contexts, bbox,
-                                                AV_NUM_DETECTION_BBOX_CLASSIFY, ctx->confidence);
+    if(category_count > 0){
+        // Fill bbox with best labels
+        ret = fill_detection_bbox_with_best_labels(ctx_labels, ctx_probabilities, cat_class_ctx->num_contexts, bbox,
+            AV_NUM_DETECTION_BBOX_CLASSIFY, ctx->confidence);
+    }
 
     // Clean up
     for (int i = 0; i < cat_class_ctx->num_contexts; i++) {
