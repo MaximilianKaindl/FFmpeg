@@ -1,30 +1,5 @@
 #!/bin/bash
 
-# Required dependencies for different configurations:
-#
-# Basic (Required for all configurations):
-# sudo apt install -y build-essential pkg-config
-#
-# For --cuda option:
-# sudo apt install -y nvidia-cuda-toolkit
-#
-# For --openvino option:
-# follow instruction on https://github.com/MaximilianKaindl/DeepFFMPEGVideoClassification/tree/classify_movie?tab=readme-ov-file#5-install-openvino-optional
-#
-# For --codecs option:
-# sudo apt install -y libx264-dev libx265-dev libfdk-aac-dev
-#
-# For --openssl option:
-# sudo apt install -y libssl-dev
-#
-# For --draw option:
-# sudo apt install -y libfreetype6-dev libfontconfig1-dev libharfbuzz-dev libxcb1-dev libsdl2-dev libass-dev
-#
-# For additional codec libraries (used with --all):
-# sudo apt install -y libvpx-dev libmp3lame-dev libopus-dev libaom-dev
-
-
-# Print help message
 show_help() {
     echo "Usage: $0 [OPTION]..."
     echo "Configure FFmpeg build environment with various dependencies."
@@ -41,6 +16,29 @@ show_help() {
     echo
     echo "Multiple options can be specified together (e.g., --openvino --cuda)"
     echo "No arguments will configure for basic LibTorch and Tokenizers support only."
+    echo
+    echo "Required dependencies for different configurations:"
+    echo
+    echo "Basic (Required for all configurations):"
+    echo "sudo apt install -y build-essential pkg-config"
+    echo
+    echo "For --cuda option:"
+    echo "sudo apt install -y nvidia-cuda-toolkit"
+    echo
+    echo "For --openvino option:"
+    echo "follow instruction on https://github.com/MaximilianKaindl/DeepFFMPEGVideoClassification/tree/classify_movie?tab=readme-ov-file#5-install-openvino-optional"
+    echo
+    echo "For --codecs option:"
+    echo "sudo apt install -y libx264-dev libx265-dev libfdk-aac-dev"
+    echo
+    echo "For --openssl option:"
+    echo "sudo apt install -y libssl-dev"
+    echo
+    echo "For --draw option:"
+    echo "sudo apt install -y libfreetype6-dev libfontconfig1-dev libharfbuzz-dev libxcb1-dev libsdl2-dev libass-dev"
+    echo
+    echo "For additional codec libraries (used with --all):"
+    echo "sudo apt install -y libvpx-dev libmp3lame-dev libopus-dev libaom-dev"
 }
 
 # Print bashrc variables
