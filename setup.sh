@@ -9,7 +9,7 @@ show_help() {
     echo "  --help            Show this help message"
     echo "  --openvino        Include OpenVINO support"
     echo "  --cuda            Use LibTorch with CUDA support"
-    echo "  --all             Include all dependencies (OpenVINO, CUDA, and additional codecs)"
+    echo "  --codecs          additional codecs, ssl and gpl support
     echo "  --print-bashrc    Print lines to add to your .bashrc file"
     echo
     echo "Multiple options can be specified together (e.g., --openvino --cuda)"
