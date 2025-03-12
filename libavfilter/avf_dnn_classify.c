@@ -34,6 +34,7 @@
 #include "libavutil/opt.h"
 #include "libavutil/time.h"
 #include "video.h"
+#include <float.h>
 
 /*
     Labels that are being used to classify the image
@@ -579,7 +580,7 @@ static int get_category_total_label_count(CategoryClassifcationContext *cat_ctx,
 static CategoryContext *get_best_category(CategoriesContext *categories_ctx, float *probabilities)
 {
     CategoryContext *best_category = NULL;
-    float best_probability = -1.0f;
+    float best_probability = FLT_MIN;
     int prob_offset = 0;
 
     // Calculate total probability for each category
@@ -592,7 +593,7 @@ static CategoryContext *get_best_category(CategoriesContext *categories_ctx, flo
             category->total_probability += probabilities[prob_offset + label_idx];
         }
 
-        if (category->total_probability > best_probability) {
+        if (category->total_probability > best_probability && category->total_probability > 0.0f) {
             best_probability = category->total_probability;
             best_category = category;
         }
