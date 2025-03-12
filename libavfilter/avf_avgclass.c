@@ -65,6 +65,17 @@ static const AVOption avgclass_options[] = {
 };
 AVFILTER_DEFINE_CLASS(avgclass);
 
+/**
+ * Find an existing class entry by label or create a new one if it doesn't exist.
+ * 
+ * @param stream_ctx  Stream context containing the class probabilities array
+ * @param label       Class label to search for or create
+ * 
+ * @return Pointer to the found or newly created ClassProb structure,
+ *         or NULL if memory allocation for a new entry fails
+ * 
+ * @note If a new class is created, it will be initialized with count=0 and sum=0.0
+ */
 static ClassProb *find_or_create_class(StreamContext *stream_ctx, const char *label)
 {
     int i;
@@ -87,6 +98,20 @@ static ClassProb *find_or_create_class(StreamContext *stream_ctx, const char *la
     return &stream_ctx->class_probs[stream_ctx->nb_classes++];
 }
 
+/**
+ * Logs classification averages to the console and exports them to a CSV file.
+ *
+ * This function processes the accumulated classification data for all streams and:
+ * 1. Always logs the results to the console with AV_LOG_INFO level
+ * 2. If output_file is specified, writes the results to a CSV file with format:
+ *    "stream_id,label,avg_probability,count"
+ *
+ * For CSV output, labels containing commas are properly escaped with quotes.
+ * If the file cannot be opened, an error message is logged but console output
+ * will still proceed.
+ *
+ * @param ctx The AVFilterContext containing the filter instance
+ */
 static void log_and_export_classification_averages(AVFilterContext *ctx)
 {
     AvgClassContext *s = ctx->priv;
@@ -151,6 +176,19 @@ static void log_and_export_classification_averages(AVFilterContext *ctx)
         fclose(f);
 }
 
+/**
+ * Process detection bounding boxes from frame side data.
+ * 
+ * This function extracts classification data from detection bounding boxes
+ * in the frame's side data, validates the data, and accumulates class probabilities
+ * for later averaging.
+ *
+ * @param ctx          Filter context
+ * @param stream_idx   Index of the stream being processed
+ * @param frame        Video frame containing detection bounding boxes as side data
+ * 
+ * @return 0 on success, a negative AVERROR code on failure (only AVERROR(ENOMEM) currently)
+ */
 static int process_frame(AVFilterContext *ctx, int stream_idx, AVFrame *frame)
 {
     AvgClassContext *s = ctx->priv;
@@ -234,6 +272,21 @@ static int process_frame(AVFilterContext *ctx, int stream_idx, AVFrame *frame)
     return 0;
 }
 
+/**
+ * @brief Defines and sets the supported formats, channel layouts, and sample rates for input and output.
+ *
+ * This function configures the supported media formats for all input and output pads
+ * of the filter. It handles all media types (audio, video, etc.) and ensures that:
+ * - All formats of each media type are supported
+ * - For audio streams, all sample rates and channel layouts are supported
+ * - The same format constraints are applied to both input and output pads
+ *
+ * @param ctx      The filter context
+ * @param cfg_in   Array of input format configurations
+ * @param cfg_out  Array of output format configurations
+ *
+ * @return 0 on success, a negative AVERROR code on failure
+ */
 static int query_formats(const AVFilterContext *ctx, AVFilterFormatsConfig **cfg_in, AVFilterFormatsConfig **cfg_out)
 {
     const AvgClassContext *s = ctx->priv;
@@ -278,6 +331,16 @@ static int query_formats(const AVFilterContext *ctx, AVFilterFormatsConfig **cfg
     return 0;
 }
 
+/**
+ * Configure output link with parameters from the corresponding input link.
+ *
+ * This function copies various properties from the input link to the output link,
+ * ensuring that format information, dimensions, time bases, and other properties
+ * are preserved through the filter.
+ *
+ * @param outlink The output link to configure
+ * @return 0 on success
+ */
 static int config_output(AVFilterLink *outlink)
 {
     FilterLink *outl = ff_filter_link(outlink);
@@ -296,6 +359,18 @@ static int config_output(AVFilterLink *outlink)
     return 0;
 }
 
+/**
+ * Get a video buffer for the input frame.
+ *
+ * This function retrieves a video buffer from the corresponding output link
+ * based on the input link index. It ensures that the buffer size matches the
+ * requested width and height.
+ *
+ * @param inlink The input link requesting the buffer
+ * @param w The width of the requested buffer
+ * @param h The height of the requested buffer
+ * @return The allocated video buffer frame
+ */
 static AVFrame *get_video_buffer(AVFilterLink *inlink, int w, int h)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -305,6 +380,17 @@ static AVFrame *get_video_buffer(AVFilterLink *inlink, int w, int h)
     return ff_get_video_buffer(outlink, w, h);
 }
 
+/**
+ * Get an audio buffer for the input.
+ *
+ * This function allocates an audio buffer for the given number of samples. The buffer
+ * is allocated from the corresponding output link to ensure compatibility.
+ *
+ * @param inlink     The input link requesting the audio buffer
+ * @param nb_samples Number of samples to allocate
+ * 
+ * @return A pointer to the allocated audio frame buffer or NULL on failure
+ */
 static AVFrame *get_audio_buffer(AVFilterLink *inlink, int nb_samples)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -314,6 +400,19 @@ static AVFrame *get_audio_buffer(AVFilterLink *inlink, int nb_samples)
     return ff_get_audio_buffer(outlink, nb_samples);
 }
 
+/**
+ * Initialize the avgclass filter.
+ *
+ * This function sets up input and output pads for both audio and video streams
+ * according to the configuration in the AvgClassContext. It creates:
+ * - Input pads with appropriate buffer getters (get_video_buffer for video,
+ *   get_audio_buffer for audio)
+ * - Output pads with config_props callback
+ * - Allocates memory for stream contexts
+ *
+ * @param ctx The filter context
+ * @return 0 on success, a negative AVERROR code on failure
+ */
 static av_cold int avgclass_init(AVFilterContext *ctx)
 {
     AvgClassContext *s = ctx->priv;
@@ -357,6 +456,16 @@ static av_cold int avgclass_init(AVFilterContext *ctx)
     return 0;
 }
 
+/**
+ * Flushes the filter and finalizes classification processing.
+ *
+ * This function performs final operations when the filter is being flushed:
+ * 1. Writes the accumulated classification averages to the output file
+ * 2. Sets EOF status on all output links that haven't received it yet
+ *
+ * @param ctx The filter context
+ * @return Always returns 0 indicating success
+ */
 static int flush_filter(AVFilterContext *ctx)
 {
     int i;
@@ -377,6 +486,23 @@ static int flush_filter(AVFilterContext *ctx)
     return 0;
 }
 
+/**
+ * Activate function for the average classification filter.
+ *
+ * This function handles the activation of the filter context, processing frames
+ * from inputs and forwarding them to outputs. It implements bidirectional EOF
+ * handling to ensure proper termination of filter chains.
+ *
+ * The function performs the following operations:
+ * - Consume and process frames from each input
+ * - Forward processed frames to corresponding outputs
+ * - Request more frames when needed
+ * - Flush when all inputs have reached EOF
+ *
+ * @param ctx The filter context
+ * @return A non-negative number on success, a negative AVERROR on failure, or
+ *         FFERROR_NOT_READY if more input is needed.
+ */
 static int avgclass_activate(AVFilterContext *ctx)
 {
     int ret, status, input_status;

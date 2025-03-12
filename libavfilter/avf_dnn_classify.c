@@ -239,6 +239,23 @@ static int detection_bbox_set_content(AVDetectionBBox *bbox, char *label, int in
     return 0;
 }
 
+/**
+ * Fill detection bounding box with best class labels based on probabilities.
+ *
+ * This function populates a detection bounding box with class labels that have 
+ * probabilities above a specified threshold. If the maximum number of classes per box 
+ * is reached, it will replace the label with the lowest probability if the new label 
+ * has a higher probability.
+ *
+ * @param labels              Array of class labels
+ * @param probabilities       Array of probability values corresponding to labels
+ * @param num_labels          Number of labels/probabilities in the arrays
+ * @param bbox                Pointer to AVDetectionBBox structure to be filled
+ * @param max_classes_per_box Maximum number of classifications to store per bounding box
+ * @param confidence_threshold Minimum probability threshold for a label to be included
+ *
+ * @return 0 on success, a negative AVERROR value on failure
+ */
 static fill_detection_bbox_with_best_labels(char **labels, float *probabilities, int num_labels, AVDetectionBBox *bbox, int max_classes_per_box, float confidence_threshold)
 {
     int i, j, minpos, ret;
@@ -278,6 +295,22 @@ static fill_detection_bbox_with_best_labels(char **labels, float *probabilities,
     return 0;
 }
 
+/**
+ * Read classification labels from a file.
+ * 
+ * This function reads a file containing classification labels, with one label per line.
+ * It removes trailing whitespaces, carriage returns, and newlines from each label.
+ * Empty lines are skipped. The labels are stored in the LabelContext structure.
+ *
+ * @param context                 The AVFilterContext used for logging.
+ * @param label_classification_ctx The LabelContext structure where the labels will be stored.
+ * @param labels_filename         The path to the file containing the labels.
+ * @param max_line_length         The maximum allowed length for each label.
+ *
+ * @return 0 on success, a negative AVERROR value on failure:
+ *         AVERROR(EINVAL) if the file can't be opened or a label is too long,
+ *         AVERROR(ENOMEM) if memory allocation fails.
+ */
 static int read_classify_label_file(AVFilterContext *context, LabelContext *label_classification_ctx,
                                     char *labels_filename, int max_line_length)
 {
@@ -337,6 +370,36 @@ static int read_classify_label_file(AVFilterContext *context, LabelContext *labe
     return 0;
 }
 
+/**
+ * Read and parse a classification categories file.
+ *
+ * This function reads a hierarchical category file with the following format:
+ * - [ContextName] - Defines a context (group of categories)
+ * - (CategoryName) - Defines a category within the current context
+ * - label - Defines a label within the current category
+ *
+ * Example file structure:
+ * [Animals]
+ * (Mammals)
+ * dog
+ * cat
+ * (Birds)
+ * eagle
+ * sparrow
+ * [Vehicles]
+ * (Cars)
+ * sedan
+ * SUV
+ *
+ * @param context            The AVFilterContext for logging
+ * @param cat_class_ctx      Pointer to CategoryClassifcationContext where parsed data will be stored
+ * @param categories_filename Path to the categories file
+ * @param max_line_length    Maximum allowed length for a line in the file
+ *
+ * @return 0 on success, a negative AVERROR code on failure:
+ *         - AVERROR(EINVAL): Invalid file format or missing file
+ *         - AVERROR(ENOMEM): Memory allocation failure
+ */
 static int read_classify_categories_file(AVFilterContext *context, CategoryClassifcationContext *cat_class_ctx,
                                         char *categories_filename, int max_line_length)
 {
@@ -519,6 +582,18 @@ end:
     return ret;
 }
 
+/**
+ * Combine all category labels from different contexts into a single LabelContext.
+ * 
+ * This function collects all labels from multiple categories and categories contexts
+ * and creates a unified label context that contains all of them.
+ * 
+ * @param label_ctx      Pointer to the LabelContext pointer to be allocated and filled
+ * @param cat_class_ctx  Pointer to the CategoryClassifcationContext containing all categories
+ * 
+ * @return 0 on success, a negative AVERROR value on failure
+ *         - AVERROR(ENOMEM) if memory allocation fails
+ */
 static int combine_all_category_labels(LabelContext **label_ctx, CategoryClassifcationContext *cat_class_ctx)
 {
     char **combined_labels = NULL;
@@ -552,6 +627,18 @@ static int combine_all_category_labels(LabelContext **label_ctx, CategoryClassif
     return 0;
 }
 
+/**
+ * Gets the label count for each category in a CategoryClassificationContext.
+ * 
+ * @param cat_ctx       Pointer to the CategoryClassificationContext structure containing category data.
+ * @param label_counts  Address of a pointer that will be set to a newly allocated array
+ *                      containing the count of labels for each category context.
+ *                      The caller is responsible for freeing this memory using av_free().
+ * 
+ * @return On success, returns the number of contexts (size of the allocated array).
+ *         Returns 0 if cat_ctx is NULL or contains no contexts.
+ *         Returns a negative AVERROR code in case of memory allocation failure.
+ */
 static int get_category_total_label_count(CategoryClassifcationContext *cat_ctx, int **label_counts)
 {
     if (!cat_ctx || cat_ctx->num_contexts <= 0) {
@@ -577,6 +664,20 @@ static int get_category_total_label_count(CategoryClassifcationContext *cat_ctx,
     return cat_ctx->num_contexts;
 }
 
+/**
+ * Finds the category with the highest total probability.
+ * 
+ * This function calculates the total probability for each category by summing
+ * the probabilities of all labels within that category. It then returns the
+ * category that has the highest total probability, provided that this probability
+ * is greater than zero.
+ *
+ * @param categories_ctx The context containing all available categories
+ * @param probabilities  Array of probability values for all labels across all categories
+ * 
+ * @return The category with the highest total probability, or NULL if no category
+ *         has a > 0 probability
+ */
 static CategoryContext *get_best_category(CategoriesContext *categories_ctx, float *probabilities)
 {
     CategoryContext *best_category = NULL;
@@ -604,6 +705,20 @@ static CategoryContext *get_best_category(CategoriesContext *categories_ctx, flo
     return best_category;
 }
 
+/**
+ * Finds or creates a detection bounding box in a frame's side data.
+ *
+ * This function either retrieves an existing AVDetectionBBox from a frame's
+ * side data or creates new side data if none exists. It also updates the
+ * source information in the header with the current model filename.
+ *
+ * @param frame       The AVFrame to operate on
+ * @param bbox_index  Index of the bounding box to retrieve
+ * @param filter_ctx  Filter context for logging
+ * @param ctx         DnnClassify filter context containing model information
+ *
+ * @return Pointer to the requested AVDetectionBBox, or NULL if an error occurred
+ */
 static AVDetectionBBox *find_or_create_detection_bbox(AVFrame *frame, uint32_t bbox_index, AVFilterContext *filter_ctx,
                                                     DnnClassifyContext *ctx)
 {
@@ -695,6 +810,20 @@ static int post_proc_standard(AVFrame *frame, DNNData *output, uint32_t bbox_ind
     return 0;
 }
 
+/**
+ * Processes the output of a DNN classification model and adds classification labels to a detection bounding box.
+ *
+ * This function takes the output probabilities from a DNN classification model and assigns
+ * the most confident class labels to a specific bounding box in the frame. It either finds an
+ * existing bounding box with the given index or creates a new one if needed.
+ *
+ * @param frame          The video frame containing detection bounding boxes
+ * @param output         Pointer to the DNN model output data containing classification probabilities
+ * @param bbox_index     Index of the bounding box to which classification should be applied
+ * @param filter_ctx     Pointer to the filter context
+ *
+ * @return 0 on success, a negative AVERROR code on failure
+ */
 static int post_proc_clxp_labels(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
     DnnClassifyContext *ctx = filter_ctx->priv;
@@ -719,6 +848,22 @@ static int post_proc_clxp_labels(AVFrame *frame, DNNData *output, uint32_t bbox_
     return 0;
 }
 
+/**
+ * Process classification results for categories and update detection bounding boxes.
+ * 
+ * This function handles the post-processing of classification results from DNN models
+ * for multiple category contexts. It finds the best category for each context, 
+ * and updates the detection bounding box with the most confident labels.
+ *
+ * @param frame        The AVFrame containing video data and side data
+ * @param output       The neural network output data containing classification probabilities
+ * @param bbox_index   Index of the detection bounding box to update
+ * @param filter_ctx   Filter context containing configuration and state
+ *
+ * @return 0 on success, a negative AVERROR code on failure
+ *         - AVERROR(EINVAL) if the bounding box couldn't be found or created
+ *         - AVERROR(ENOMEM) if memory allocation fails
+ */
 static int post_proc_clxp_categories(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
     DnnClassifyContext *ctx = filter_ctx->priv;
@@ -802,6 +947,20 @@ static int post_proc_clxp_categories(AVFrame *frame, DNNData *output, uint32_t b
     return ret;
 }
 
+/**
+ * Performs post-processing on classification results from a DNN model.
+ *
+ * This function handles the post-processing of DNN output data for the classify filter.
+ * It delegates to specific post-processing functions based on the backend type and 
+ * available classification context.
+ *
+ * @param frame       The AVFrame being processed
+ * @param output      The output data from the DNN model
+ * @param bbox_index  Index of the bounding box (for detection models)
+ * @param filter_ctx  The filter context
+ *
+ * @return 0 on success, a negative AVERROR code on failure
+ */
 static int dnn_classify_post_proc(AVFrame *frame, DNNData *output, uint32_t bbox_index, AVFilterContext *filter_ctx)
 {
     DnnClassifyContext *ctx = filter_ctx->priv;
@@ -835,6 +994,29 @@ static void free_contexts(DnnClassifyContext *ctx)
     }
 }
 
+/**
+ * Configure input for the DNN classify filter.
+ * 
+ * This function configures the input link for the DNN classify filter. It sets
+ * up the media type (audio or video), validates input parameters, initializes
+ * the label and category contexts, and sets up the appropriate DNN backend.
+ * 
+ * For audio classification:
+ * - Requires Torch backend
+ * - Validates the sample rate (should be 44100 Hz for CLAP)
+ * - Sets goal mode to DFT_ANALYTICS_CLAP
+ * 
+ * For video classification:
+ * - Uses DFT_ANALYTICS_CLIP for Torch backend
+ * - Uses DFT_ANALYTICS_CLASSIFY for other backends (like OpenVINO)
+ * 
+ * The function also handles loading labels from either:
+ * - A single labels file
+ * - Multiple category files (for hierarchical classification)
+ * 
+ * @param inlink Input link to configure
+ * @return 0 on success, a negative error code on failure
+ */
 static int config_input(AVFilterLink *inlink)
 {
     AVFilterContext *context = inlink->dst;
@@ -973,6 +1155,25 @@ static int config_input(AVFilterLink *inlink)
     return 0;
 }
 
+/**
+ * Initialize the DNN classification filter context.
+ *
+ * This function performs the following operations:
+ * 1. Creates an input filter pad with the appropriate media type (audio or video)
+ * 2. Creates a matching output filter pad
+ * 3. Validates backend-specific parameters:
+ *    - For Torch backend (DNN_TH):
+ *      - Ensures labels and categories files are not both specified
+ *      - Requires either a labels file or a categories file
+ *      - Requires a tokenizer path for CLIP/CLAP models
+ *    - For OpenVINO backend (DNN_OV):
+ *      - Requires a labels file
+ *      - Does not support categories file
+ *      - Does not support audio classification
+ *
+ * @param context The AVFilterContext for this filter
+ * @return 0 on success, a negative AVERROR code on failure
+ */
 static av_cold int dnn_classify_init(AVFilterContext *context)
 {
     DnnClassifyContext *ctx = context->priv;
@@ -1037,6 +1238,7 @@ static av_cold int dnn_classify_init(AVFilterContext *context)
     return 0;
 }
 
+
 static const enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_RGB24,   AV_PIX_FMT_BGR24,   AV_PIX_FMT_GRAY8,
                                             AV_PIX_FMT_GRAYF32, AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
                                             AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
@@ -1044,6 +1246,17 @@ static const enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_RGB24,   AV_PIX_FMT_BGR
 
 static const enum AVSampleFormat sample_fmts[] = {AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_NONE};
 
+/**
+ * Defines supported pixel formats, sample formats, and negotiates input/output formats for the DNN classify filter.
+ * 
+ * This function handles format negotiation for both video and audio inputs:
+ * - For video: Sets common pixel formats from the predefined list (RGB24, BGR24, GRAY8, etc.)
+ * - For audio: Sets sample format (float), sample rates (from torch options if using libtorch),
+ *   and supports all channel layouts
+ * 
+ * @param ctx The filter context containing filter-specific data and links to input/output pads
+ * @return 0 on success, a negative error code on failure
+ */
 static int query_formats(AVFilterContext *ctx)
 {
     DnnClassifyContext *classify_ctx = ctx->priv;
@@ -1077,6 +1290,18 @@ static int query_formats(AVFilterContext *ctx)
 
     return 0;
 }
+/**
+ * Flushes any pending frames from the DNN classify filter.
+ *
+ * This function flushes the DNN context and processes any pending frames.
+ * It continues to poll for results until no more frames are available for processing.
+ *
+ * @param outlink   The output link through which frames are passed
+ * @param pts       Presentation timestamp for frame adjustment
+ * @param out_pts   Pointer to store the PTS of the last output frame (can be NULL)
+ *
+ * @return 0 on success, negative value on error
+ */
 static int dnn_classify_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t *out_pts)
 {
     AVFilterContext *context = outlink->src;
@@ -1106,6 +1331,19 @@ static int dnn_classify_flush_frame(AVFilterLink *outlink, int64_t pts, int64_t 
     return 0;
 }
 
+/**
+ * Processes a video frame through a DNN model for classification.
+ *
+ * @param ctx   The DnnClassifyContext containing the DNN context and classification configuration.
+ * @param frame The input video frame to be processed. This function does not free the frame on success.
+ *
+ * @return 0 on success, AVERROR(EIO) on execution failure. In case of failure,
+ *         the input frame is freed.
+ *
+ * @note Different execution paths are taken depending on the backend type:
+ *       - For DNN_TH backend: Uses the clip model execution with tokenizer and labels
+ *       - For other backends: Uses the standard classification model execution
+ */
 static int process_video_frame(DnnClassifyContext *ctx, AVFrame *frame)
 {
     int ret;
@@ -1138,6 +1376,22 @@ static int process_audio_frame(DnnClassifyContext *ctx, AVFrame *frame)
     return 0;
 }
 
+/**
+ * Process audio input by collecting samples into a buffer until enough samples
+ * are gathered for DNN inference.
+ *
+ * This function accumulates audio samples from input frames until it has collected
+ * the required number of samples for the DNN model (based on sample rate and duration).
+ * Once enough samples are collected, it processes the complete buffer through the
+ * DNN model and resets the collection state for the next batch.
+ *
+ * @param ctx      DNN classification filter context
+ * @param inlink   Input link from which to consume audio frames
+ *
+ * @return >= 0 on success, negative AVERROR code on failure
+ *         AVERROR(EAGAIN) when more input is needed
+ *         AVERROR(ENOMEM) when memory allocation fails
+ */
 static int process_audio_buffer(DnnClassifyContext *ctx, AVFilterLink *inlink)
 {
     static AVFrame *audio_buffer = NULL;
@@ -1204,6 +1458,20 @@ static int process_audio_buffer(DnnClassifyContext *ctx, AVFilterLink *inlink)
     return ret;
 }
 
+/**
+ * Activates the DNN classification filter.
+ * 
+ * This function handles the processing pipeline for DNN classification, including:
+ * - Checking for end-of-file conditions
+ * - Buffering and processing audio if the media is audio type
+ * - Consuming and processing video frames if the media is video type
+ * - Retrieving and forwarding processed results from the DNN context
+ * - Managing the frame flow by requesting more frames when needed
+ * 
+ * @param context The filter context containing input/output links and private data
+ * @return 0 if frames were successfully processed, FFERROR_NOT_READY if no frames 
+ *         are currently ready, or a negative error code on failure
+ */
 static int dnn_classify_activate(AVFilterContext *context)
 {
     DnnClassifyContext *ctx = context->priv;

@@ -79,6 +79,23 @@ static const AVOption dnn_th_options[] = {
     { NULL }
 };
 
+/**
+ * Extract last-level tasks from a given task based on function type.
+ * 
+ * This function processes a TaskItem and creates corresponding LastLevelTaskItem(s)
+ * to be added to the queue for execution. The behavior varies depending on the function type:
+ * - For DFT_PROCESS_FRAME and DFT_ANALYTICS_CLAP: Creates a single last-level task
+ * - For DFT_ANALYTICS_CLIP:  Creates a single last-level task or creates tasks based on detected bounding boxes in the frame, filtered by target label
+ *
+ * @param func_type    The type of function to execute (DFT_PROCESS_FRAME, DFT_ANALYTICS_CLAP, or DFT_ANALYTICS_CLIP)
+ * @param task         Pointer to the task item to process
+ * @param lltask_queue Queue to which the created last-level tasks will be added
+ * @param exec_params  Execution parameters, cast to appropriate type based on func_type
+ *
+ * @return 0 on success, a negative AVERROR value on failure:
+ *         - AVERROR(ENOMEM): Memory allocation failure
+ *         - AVERROR(EINVAL): Invalid function type
+ */
 static int extract_lltask_from_task(DNNFunctionType func_type, TaskItem *task, Queue *lltask_queue, DNNExecBaseParams *exec_params)
 {
     THModel *th_model = (THModel *)task->model;
@@ -266,6 +283,26 @@ static void deleter(void *arg)
 }
 
 #if (CONFIG_LIBTOKENIZERS == 1)
+/**
+ * @brief Tokenizes a batch of text labels and prepares tensors for deep learning models.
+ *
+ * This function processes a batch of text labels by:
+ * 1. Validating input parameters
+ * 2. Creating and using a tokenizer to convert text labels into token IDs
+ * 3. Generating tokenized text and attention mask tensors
+ * 4. Moving the tensors to the specified device (CPU/GPU)
+ *
+ * @param clxp_ctx     Pointer to THClxpContext where the resulting tensors will be stored
+ * @param labels       Array of text labels to tokenize
+ * @param label_count  Number of labels in the array
+ * @param tokenizer_path Path to the tokenizer model file
+ * @param ctx         DnnContext containing configuration information
+ * @param device      The target device (CPU/GPU) for the tensors
+ *
+ * @return 0 on success, a negative AVERROR value on failure
+ *         - AVERROR(EINVAL) if labels are invalid or tokenizer_path is NULL
+ *         - Other errors that might occur during tokenization
+ */
 static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels, int label_count,
                                 const char *tokenizer_path, DnnContext *ctx, const c10::Device &device)
 {
@@ -326,6 +363,22 @@ static int get_tokenized_batch(THClxpContext *clxp_ctx, const char **labels, int
     return 0;
 }
 
+/**
+ * Tests CLIP model inference by attempting to run forward pass with different input resolutions.
+ * 
+ * This function determines a working input resolution for a CLIP (Contrastive Language-Image Pretraining)
+ * model by either:
+ * 1. Using the input resolution specified in torch_option if provided
+ * 2. Testing a series of common CLIP input dimensions until one works
+ * 
+ * The function creates a zero tensor with the tested dimensions, sends it to the appropriate device,
+ * and attempts to run the model's forward pass along with tokenized text input.
+ * 
+ * @param th_model Pointer to the THModel structure containing the loaded CLIP model and context
+ * @param device The torch device where inference should be performed (CPU, CUDA, etc.)
+ * 
+ * @return 0 on success, AVERROR(EINVAL) if no working resolution is found
+ */
 static int test_clip_inference(THModel *th_model, const c10::Device &device)
 {
     // Try given resolution
@@ -389,6 +442,20 @@ static int test_clip_inference(THModel *th_model, const c10::Device &device)
     return 0;
 }
 
+/**
+ * Tests CLAP (Contrastive Language-Audio Pretraining) model inference compatibility
+ * 
+ * This function validates whether the loaded model can successfully perform inference
+ * with the provided audio parameters. It creates a dummy audio tensor and performs a
+ * test forward pass through the model.
+ *
+ * @param th_model Pointer to the THModel structure containing the JIT model and context
+ * @param sample_rate The audio sample rate in Hz
+ * @param sample_duration The duration in seconds for the test audio
+ * @param device The torch device to run inference on (CPU or CUDA)
+ *
+ * @return 0 on successful inference test, AVERROR code on failure
+ */
 static int test_clap_inference(THModel *th_model, int64_t sample_rate, int64_t sample_duration, const c10::Device &device)
 {
     try {
@@ -418,6 +485,23 @@ static int test_clap_inference(THModel *th_model, int64_t sample_rate, int64_t s
     return 0;
 }
 
+/**
+ * Initialize a CLXP model in a THModel structure.
+ * 
+ * This function sets up a CLXP context in the given THModel, tokenizes the provided labels
+ * using the specified tokenizer, and prepares the model for classification tasks.
+ *
+ * @param th_model       Pointer to the THModel structure to initialize
+ * @param func_type      The function type of the DNN model
+ * @param labels         Array of label strings to be tokenized
+ * @param label_count    Number of labels in the labels array
+ * @param tokenizer_path Path to the tokenizer file
+ * @param filter_ctx     AVFilter context
+ *
+ * @return 0 on success, a negative AVERROR value on failure
+ *         - AVERROR(ENOMEM) if memory allocation fails
+ *         - Other negative values if tokenization fails
+ */
 static int init_clxp_model(THModel *th_model, DNNFunctionType func_type, const char **labels, int label_count,
                             const char *tokenizer_path, const AVFilterContext *filter_ctx)
 {
@@ -437,6 +521,19 @@ static int init_clxp_model(THModel *th_model, DNNFunctionType func_type, const c
 }
 #endif
 
+/**
+ * Copies an array of softmax unit indices to the torch model context.
+ * 
+ * @param th_model          Pointer to the THModel structure where the units will be stored
+ * @param softmax_units     Array of integers representing softmax unit indices, can be NULL
+ * @param softmax_units_count Number of elements in the softmax_units array
+ * 
+ * @return 0 on success, a negative AVERROR code on failure (AVERROR(ENOMEM) if memory allocation fails)
+ * 
+ * This function allocates memory for and copies the provided softmax unit indices
+ * to the context of the torch model. If softmax_units is NULL or softmax_units_count
+ * is 0 or negative, softmax_units in the model context will be set to NULL and the count to 0.
+ */
 static int copy_softmax_units(THModel *th_model, const int *softmax_units, int softmax_units_count)
 {
     if (softmax_units && softmax_units_count > 0) {
@@ -454,6 +551,20 @@ static int copy_softmax_units(THModel *th_model, const int *softmax_units, int s
     return 0;
 }
 
+/**
+ * Calculates the similarity matrix between two tensors.
+ *
+ * @param tensor1 First input tensor.
+ * @param tensor2 Second input tensor.
+ * @param normalize If true, both tensors will be L2-normalized along the last dimension before similarity calculation.
+ * @param logit_scale Scaling factor applied to the similarity matrix.
+ * @param ctx DNN context used for logging errors.
+ *
+ * @return Similarity matrix as a torch::Tensor. The similarity is calculated as logit_scale * (tensor2 @ tensor1.T).
+ *         Returns an empty tensor if an error occurs during computation.
+ *
+ * @note The returned similarity matrix is transposed (0,1) from the initial computation.
+ */
 static torch::Tensor calculate_similarity(torch::Tensor &tensor1, torch::Tensor &tensor2, bool normalize, float logit_scale, DnnContext *ctx)
 {
     try {
@@ -471,6 +582,30 @@ static torch::Tensor calculate_similarity(torch::Tensor &tensor1, torch::Tensor 
     }
 }
 
+/**
+ * @brief Applies softmax function to specified segments of a tensor with temperature scaling.
+ * 
+ * This function applies the softmax operation to an input tensor, either to the entire
+ * tensor or to specific segments defined by the softmax_units array. When temperature
+ * scaling is specified, the input values are divided by the temperature before softmax
+ * is applied.
+ * 
+ * @param input_tensor The PyTorch tensor to apply softmax to.
+ * @param temperature Scaling factor for logits. If > 0 and != 1.0, input is divided by this value.
+ *                   Use values > 1.0 to make distribution more uniform, < 1.0 to make it more peaky.
+ * @param softmax_units Array specifying the lengths of segments to apply softmax to separately.
+ * @param softmax_units_count Number of elements in the softmax_units array.
+ * @param ctx DNN context used for logging errors.
+ * 
+ * @return The tensor after softmax application. Returns the original tensor if an error occurs
+ *         or if input validation fails.
+ * 
+ * @note If softmax_units is NULL or softmax_units_count <= 0, softmax is applied to the entire tensor
+ *       along dimension 1.
+ * @note The function expects the input tensor to have at least 2 dimensions.
+ * @note Any segments of the tensor not covered by softmax_units will remain unchanged and generate
+ *       an error log.
+ */
 static torch::Tensor apply_softmax(torch::Tensor input_tensor, float temperature, const int *softmax_units, int softmax_units_count, DnnContext *ctx)
 {
     try {
@@ -531,6 +666,17 @@ static torch::Tensor apply_softmax(torch::Tensor input_tensor, float temperature
     }
 }
 
+/**
+ * Handles short audio tensors by extending them to a target length.
+ * 
+ * This function takes an audio tensor that is shorter than a required target length
+ * and extends it by repeating the tensor as many times as necessary to reach or exceed
+ * the target length. It then slices the result to exactly match the target length.
+ * 
+ * @param audio_tensor The input audio tensor to be extended.
+ * @param target_samples The target number of samples the output tensor should have.
+ * @return A torch::Tensor containing the extended audio with exactly target_samples length.
+ */
 static torch::Tensor handle_short_audio_tensor(torch::Tensor audio_tensor, int target_samples)
 {
     int nb_samples = audio_tensor.size(0);
@@ -543,6 +689,23 @@ static torch::Tensor handle_short_audio_tensor(torch::Tensor audio_tensor, int t
     return repeated.slice(0, 0, target_samples);
 }
 
+/**
+ * @brief Handles audio tensors that are longer than required by extracting a representative segment.
+ * 
+ * This function takes a long audio tensor and extracts a fixed-length segment of the
+ * specified target size. It uses a deterministic selection strategy that is biased
+ * toward center segments (about 33% of cases) with controlled randomness derived from
+ * frame properties to ensure consistent results for the same input.
+ * 
+ * @param audio_tensor The input audio tensor to process
+ * @param target_samples The desired number of samples in the output tensor
+ * @param task Pointer to the task item containing frame information used for deterministic seed generation
+ * 
+ * @return A tensor slice of length target_samples extracted from the input audio tensor
+ * 
+ * @note The function handles the case where the input audio is longer than needed
+ *       for the DNN model input requirements.
+ */
 static torch::Tensor handle_long_audio_tensor(torch::Tensor audio_tensor, int target_samples, TaskItem *task)
 {
     int nb_samples = audio_tensor.size(0);
@@ -567,6 +730,22 @@ static torch::Tensor handle_long_audio_tensor(torch::Tensor audio_tensor, int ta
     return audio_tensor.slice(0, start_idx, start_idx + target_samples);
 }
 
+/**
+ * @brief Prepares audio data as a Torch tensor for inference.
+ *
+ * This function processes audio data from an input frame and prepares it 
+ * as a Torch tensor suitable for model inference. It performs validation
+ * of audio parameters, converts the audio data to a tensor, and handles
+ * cases where the input audio length doesn't match the expected model input
+ * length by either padding short audio or trimming long audio.
+ *
+ * @param th_model      Pointer to the Torch model structure
+ * @param request       Pointer to the request item containing inference information
+ *
+ * @return 0 on success, a negative AVERROR code on failure:
+ *         - AVERROR(EINVAL) if input data is invalid, sample parameters don't match,
+ *           or tensor processing fails
+ */
 static int prepare_audio_tensor(const THModel *th_model, const THRequestItem *request)
 {
     THInferRequest *infer_request = request->infer_request;
@@ -636,6 +815,19 @@ static int prepare_audio_tensor(const THModel *th_model, const THRequestItem *re
     return ret;
 }
 
+/**
+ * Preprocesses an image tensor for use with a PyTorch model.
+ * 
+ * This function performs two main operations:
+ * 1. Moves the tensor to the specified device (CPU/GPU) if needed
+ * 2. Resizes the image using bicubic interpolation to the resolution specified in the model context
+ * 
+ * @param th_model      Pointer to the THModel structure containing the context
+ * @param input_tensor  Pointer to the tensor to preprocess (modified in-place)
+ * @param device        The target device (CPU/CUDA) for the tensor
+ * 
+ * @return 0 on success, a negative AVERROR code on failure
+ */
 static int preprocess_image_tensor(const THModel *th_model, torch::Tensor *input_tensor, const c10::Device &device)
 {
     DnnContext *ctx = th_model->ctx;
@@ -659,6 +851,23 @@ static int preprocess_image_tensor(const THModel *th_model, torch::Tensor *input
     }
 }
 
+/**
+ * @brief Fills the input of a model with data from task queue for inference.
+ * 
+ * This function prepares input data for a PyTorch model by processing frames
+ * from the task queue. It handles different types of inputs including audio
+ * (for CLAP analytics) and images (for standard processing or CLIP analytics).
+ * For image inputs, it builds a batch of tensors from all available tasks in
+ * the queue.
+ *
+ * @param th_model Pointer to the PyTorch model structure
+ * @param request Pointer to the request item containing inference request
+ *
+ * @return 0 on success, negative AVERROR value on failure:
+ *         - AVERROR(ENOMEM) if memory allocation fails
+ *         - AVERROR(EINVAL) if model function type is unsupported or tensor creation fails
+ *         - Other errors from internal function calls
+ */
 static int fill_model_input_th(THModel *th_model, THRequestItem *request)
 {
     LastLevelTaskItem *lltask = NULL;
@@ -766,6 +975,25 @@ err:
     return ret;
 }
 
+/**
+ * @brief Executes the inference process for a Torch model.
+ * 
+ * This function handles the inference process for various types of Torch models including
+ * regular frame processing and analytics models such as CLIP and CLAP. It performs the following operations:
+ * - Validates input parameters
+ * - Sets graph executor optimization based on context settings
+ * - Transfers input tensor to the appropriate device
+ * - Prepares input vectors for the model
+ * - Executes the forward pass of the model
+ * - Processes the results based on the model's function type
+ * - For analytics models, calculates similarity scores and applies softmax
+ * 
+ * @param args Pointer to a THRequestItem containing the inference request and task information
+ * 
+ * @return 0 on success, or a negative error code:
+ *         - AVERROR(EINVAL) for invalid parameters
+ *         - DNN_GENERIC_ERROR for NULL input/output tensors
+ */
 static int th_start_inference(void *args)
 {
     THRequestItem *request = (THRequestItem *)args;
@@ -844,6 +1072,20 @@ static int th_start_inference(void *args)
     return 0;
 }
 
+/**
+ * @brief Callback function invoked when a PyTorch inference completes
+ *
+ * This function processes the output tensor from a completed PyTorch inference request and
+ * handles the data according to the model's function type. It supports different output formats:
+ * - For CLIP/CLAP analytics models: Processes similarity scores
+ * - For frame processing models: Handles output tensors with dimensions [batch_size, channel, height, width]
+ *
+ * The function extracts individual outputs for each task, moves them to CPU if necessary,
+ * and passes them through appropriate post-processing based on the model type.
+ * After processing, it frees allocated resources and returns the request to the queue.
+ *
+ * @param args Pointer to a THRequestItem structure containing inference request data
+ */
 static void infer_completion_callback(void *args)
 {
     THRequestItem *request = (THRequestItem *)args;
@@ -944,6 +1186,24 @@ err:
     }
 }
 
+/**
+ * @brief Execute a Torch model based on a request item.
+ *
+ * This function processes a Torch model execution request by:
+ * 1. Retrieving the task from the last level task queue
+ * 2. Filling the model input with the request data
+ * 3. Starting the inference process
+ * 4. Handling the inference completion
+ *
+ * @param request Pointer to the THRequestItem containing the inference request details
+ * @param lltask_queue Queue containing LastLevelTaskItems to be processed
+ *
+ * @return 0 on success, a negative AVERROR code on failure, or DNN_GENERIC_ERROR if 
+ *         inference is incomplete
+ *
+ * @note If async execution is requested, the function will report that LibTorch async 
+ *       feature is missing
+ */
 static int execute_model_th(THRequestItem *request, Queue *lltask_queue)
 {
     THModel *th_model = NULL;
@@ -1042,6 +1302,23 @@ static THInferRequest *th_create_inference_request(void)
     return request;
 }
 
+/**
+ * Initialize a PyTorch model for DNN processing.
+ * 
+ * This function creates and initializes a THModel structure for PyTorch backend
+ * processing. It handles device selection (CPU/CUDA/XPU), loads the model file,
+ * and sets up necessary queues for inference requests.
+ *
+ * @param ctx         The DNN context containing configuration parameters
+ * @param func_type   The function type that specifies how the model is used
+ * @param filter_ctx  The AVFilterContext that will use this model
+ *
+ * @return A pointer to the initialized THModel structure, or NULL if initialization fails
+ *
+ * @note The function handles device initialization for CPU, CUDA, and XPU devices
+ *       based on the device name specified in the context. For CUDA devices, it
+ *       validates device availability and properly sets up the CUDA environment.
+ */
 static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx)
 {
     DNNModel *model = NULL;
@@ -1166,6 +1443,26 @@ static DNNModel *dnn_load_model_th(DnnContext *ctx, DNNFunctionType func_type, A
     return &th_model->model;
 }
 
+/**
+ * Load a PyTorch model and tokenize the labels with the given tokenizer path.
+ * 
+ * This function initializes a PyTorch model with potential tokenizer integration,
+ * particularly for CLIP or CLAP models. It sets default configuration values
+ * based on the function type and performs test inference to validate the model.
+ * 
+ * @param ctx The DNN context containing configuration options
+ * @param func_type The function type (DFT_ANALYTICS_CLIP, DFT_ANALYTICS_CLAP, etc.)
+ * @param labels Array of label strings
+ * @param label_count Number of labels in the array
+ * @param softmax_units Array of softmax unit indices
+ * @param softmax_units_count Number of softmax units in the array
+ * @param tokenizer_path Path to the tokenizer model file
+ * @param filter_ctx The AVFilter context for logging
+ * 
+ * @return Pointer to the initialized DNNModel, or NULL if initialization failed
+ * 
+ * @note This function requires CONFIG_LIBTOKENIZERS=1 for full CLIP/CLAP support
+ */
 static DNNModel *dnn_load_model_with_tokenizer_th(DnnContext *ctx, DNNFunctionType func_type, const char **labels,
                                                     int label_count, int *softmax_units, int softmax_units_count,
                                                     const char *tokenizer_path, AVFilterContext *filter_ctx)
