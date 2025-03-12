@@ -37,8 +37,8 @@ show_help() {
     echo "For --draw option:"
     echo "sudo apt install -y libfreetype6-dev libfontconfig1-dev libharfbuzz-dev libxcb1-dev libsdl2-dev libass-dev"
     echo
-    echo "For additional codec libraries (used with --all):"
-    echo "sudo apt install -y libvpx-dev libmp3lame-dev libopus-dev libaom-dev"
+    echo "To enable all:"
+    echo "sudo apt install -y build-essential pkg-config nvidia-cuda-toolkit libx264-dev libx265-dev libfdk-aac-dev libssl-dev libfreetype6-dev libfontconfig1-dev libharfbuzz-dev libxcb1-dev libsdl2-dev libass-dev libvpx-dev libmp3lame-dev libopus-dev libaom-dev"
 }
 
 # Print bashrc variables
