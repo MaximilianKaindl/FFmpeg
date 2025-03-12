@@ -1,5 +1,29 @@
 #!/bin/bash
 
+# Required dependencies for different configurations:
+#
+# Basic (Required for all configurations):
+# sudo apt install -y build-essential pkg-config
+#
+# For --cuda option:
+# sudo apt install -y nvidia-cuda-toolkit
+#
+# For --openvino option:
+# follow instruction on https://github.com/MaximilianKaindl/DeepFFMPEGVideoClassification/tree/classify_movie?tab=readme-ov-file#5-install-openvino-optional
+#
+# For --codecs option:
+# sudo apt install -y libx264-dev libx265-dev libfdk-aac-dev
+#
+# For --openssl option:
+# sudo apt install -y libssl-dev
+#
+# For --draw option:
+# sudo apt install -y libfreetype6-dev libfontconfig1-dev libharfbuzz-dev libxcb1-dev libsdl2-dev libass-dev
+#
+# For additional codec libraries (used with --all):
+# sudo apt install -y libvpx-dev libmp3lame-dev libopus-dev libaom-dev
+
+
 # Print help message
 show_help() {
     echo "Usage: $0 [OPTION]..."
@@ -9,7 +33,10 @@ show_help() {
     echo "  --help            Show this help message"
     echo "  --openvino        Include OpenVINO support"
     echo "  --cuda            Use LibTorch with CUDA support"
-    echo "  --codecs          additional codecs, ssl and gpl support"
+    echo "  --codecs          Enable codec libraries (x264, x265, fdk-aac)"
+    echo "  --openssl         Include OpenSSL support"
+    echo "  --draw            Include drawing libraries (freetype, fontconfig, harfbuzz, etc.)"
+    echo "  --all             Enable all features (shorthand for all available options)"
     echo "  --print-bashrc    Print lines to add to your .bashrc file"
     echo
     echo "Multiple options can be specified together (e.g., --openvino --cuda)"
@@ -33,7 +60,7 @@ print_bashrc() {
     echo "export LD_LIBRARY_PATH=\"\${LIBTORCH_ROOT}/lib:\${TOKENIZER_ROOT}/example/build/tokenizers:\${LD_LIBRARY_PATH}\""
 
     # Add OpenVINO paths if needed
-    if [[ $USE_OPENVINO -eq 1 || $USE_CODECS -eq 1 ]]; then
+    if [[ $USE_OPENVINO -eq 1 ]]; then
         echo "# OpenVINO environment"
         echo "export PATH=\"\${OPENVINO_ROOT}/runtime/include:\${PATH}\""
         echo "export LD_LIBRARY_PATH=\"\${OPENVINO_ROOT}/runtime/lib/intel64:\${LD_LIBRARY_PATH}\""
@@ -51,8 +78,11 @@ OPENVINO_ROOT=${OPENVINO_ROOT:-/opt/intel/openvino}
 
 # Parse command line arguments
 USE_OPENVINO=0
-USE_CODECS=0
+USE_ALL=0
 USE_CUDA=0
+USE_CODECS=0
+USE_OPENSSL=0
+USE_DRAW=0
 
 # Allow multiple arguments
 if [ "$#" -gt 0 ]; then
@@ -71,6 +101,20 @@ if [ "$#" -gt 0 ]; then
             --codecs)
                 USE_CODECS=1
                 ;;
+            --openssl)
+                USE_OPENSSL=1
+                ;;
+            --draw)
+                USE_DRAW=1
+                ;;
+            --all)
+                USE_ALL=1
+                USE_CODECS=1
+                USE_OPENSSL=1
+                USE_DRAW=1
+                USE_CUDA=1
+                USE_OPENVINO=1
+                ;;
             --print-bashrc)
                 print_bashrc
                 exit 0
@@ -83,8 +127,6 @@ if [ "$#" -gt 0 ]; then
         esac
     done
 fi
-
-# The multi-argument handling is now done above
 
 # Setup path variables
 setup_paths() {
@@ -103,7 +145,7 @@ setup_paths() {
     export PATH="${TOKENIZER_HEADER}:${LIBTORCH_HEADER}:${LIBTORCH_HEADER_CSRC}:${PATH}"
     export LD_LIBRARY_PATH="${LIBTORCH_LIB}:${TOKENIZER_LIB}:${LD_LIBRARY_PATH}"
 
-    if [[ $USE_OPENVINO -eq 1 || $USE_CODECS -eq 1 ]]; then
+    if [[ $USE_OPENVINO -eq 1 ]]; then
         # Source OpenVINO setupvars.sh if available
         if [ -f "$OPENVINO_ROOT/setupvars.sh" ]; then
             echo "Sourcing OpenVINO environment from $OPENVINO_ROOT/setupvars.sh"
@@ -126,7 +168,7 @@ verify_directories() {
     required_dirs["LibTorch Headers"]=$LIBTORCH_HEADER
     required_dirs["Tokenizers Headers"]=$TOKENIZER_HEADER
 
-    if [[ $USE_OPENVINO -eq 1 || $USE_CODECS -eq 1 ]]; then
+    if [[ $USE_OPENVINO -eq 1 ]]; then
         required_dirs["OpenVINO Library"]=$OPENVINO_LIB
         required_dirs["OpenVINO Headers"]=$OPENVINO_HEADER
     fi
@@ -165,23 +207,29 @@ generate_config_flags() {
     fi
 
     if [[ $USE_CODECS -eq 1 ]]; then
+        CONFIG_FLAGS="$CONFIG_FLAGS --enable-gpl"
+        CONFIG_FLAGS="$CONFIG_FLAGS --enable-libx264 --enable-libx265"
+        CONFIG_FLAGS="$CONFIG_FLAGS --enable-libfdk-aac --enable-nonfree"
         CONFIG_FLAGS="$CONFIG_FLAGS \
-        --enable-gpl \
-        --enable-openssl \
-        --enable-libx264 \
-        --enable-libx265 \
         --enable-libvpx \
-        --enable-libfdk-aac \
         --enable-libmp3lame \
         --enable-libopus \
+        --enable-libaom"
+
+    fi
+
+    if [[ $USE_OPENSSL -eq 1 ]]; then
+        CONFIG_FLAGS="$CONFIG_FLAGS --enable-openssl"
+    fi
+
+    if [[ $USE_DRAW -eq 1 ]]; then
+        CONFIG_FLAGS="$CONFIG_FLAGS \
         --enable-libass \
         --enable-libfreetype \
         --enable-libfontconfig \
+        --enable-libharfbuzz \
         --enable-libxcb \
-        --enable-sdl2 \
-        --enable-cuda-nvcc \
-        --enable-libnpp \
-        --enable-nonfree"
+        --enable-sdl2"
     fi
 
     echo -e "\nPreparing FFmpeg configuration with:"
@@ -196,16 +244,18 @@ main() {
 
     # Print configuration summary
     echo "FFmpeg Configuration Summary:"
-    if [[ $USE_CODECS -eq 1 ]]; then
-        echo "- Mode: Full configuration with all dependencies"
-    elif [[ $USE_OPENVINO -eq 1 && $USE_CUDA -eq 1 ]]; then
-        echo "- Mode: LibTorch with CUDA, Tokenizers, and OpenVINO"
-    elif [[ $USE_OPENVINO -eq 1 ]]; then
-        echo "- Mode: LibTorch, Tokenizers, and OpenVINO"
-    elif [[ $USE_CUDA -eq 1 ]]; then
-        echo "- Mode: LibTorch with CUDA and Tokenizers"
+    if [[ $USE_ALL -eq 1 ]]; then
+        echo "- Mode: Full configuration with all features"
     else
-        echo "- Mode: Basic (LibTorch and Tokenizers only)"
+        echo "- Mode: Custom configuration with:"
+        [[ $USE_CUDA -eq 1 ]] && echo "  • CUDA support"
+        [[ $USE_OPENVINO -eq 1 ]] && echo "  • OpenVINO support"
+        [[ $USE_CODECS -eq 1 ]] && echo "  • Codec libraries (x264, x265, fdk-aac)"
+        [[ $USE_OPENSSL -eq 1 ]] && echo "  • OpenSSL support"
+        [[ $USE_DRAW -eq 1 ]] && echo "  • Drawing libraries"
+        if [[ $USE_CUDA -eq 0 && $USE_OPENVINO -eq 0 && $USE_GPL -eq 0 && $USE_OPENSSL -eq 0 && $USE_DRAW -eq 0 ]]; then
+            echo "  • Basic (LibTorch and Tokenizers only)"
+        fi
     fi
 
     verify_directories
