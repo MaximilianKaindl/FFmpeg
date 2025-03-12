@@ -33,7 +33,7 @@ print_bashrc() {
     echo "export LD_LIBRARY_PATH=\"\${LIBTORCH_ROOT}/lib:\${TOKENIZER_ROOT}/example/build/tokenizers:\${LD_LIBRARY_PATH}\""
 
     # Add OpenVINO paths if needed
-    if [[ $USE_OPENVINO -eq 1 || $USE_ALL -eq 1 ]]; then
+    if [[ $USE_OPENVINO -eq 1 || $USE_CODECS -eq 1 ]]; then
         echo "# OpenVINO environment"
         echo "export PATH=\"\${OPENVINO_ROOT}/runtime/include:\${PATH}\""
         echo "export LD_LIBRARY_PATH=\"\${OPENVINO_ROOT}/runtime/lib/intel64:\${LD_LIBRARY_PATH}\""
@@ -51,7 +51,7 @@ OPENVINO_ROOT=${OPENVINO_ROOT:-/opt/intel/openvino}
 
 # Parse command line arguments
 USE_OPENVINO=0
-USE_ALL=0
+USE_CODECS=0
 USE_CUDA=0
 
 # Allow multiple arguments
@@ -68,10 +68,8 @@ if [ "$#" -gt 0 ]; then
             --cuda)
                 USE_CUDA=1
                 ;;
-            --all)
-                USE_ALL=1
-                USE_OPENVINO=1  # --all includes OpenVINO
-                USE_CUDA=1      # --all includes CUDA
+            --codecs)
+                USE_CODECS=1
                 ;;
             --print-bashrc)
                 print_bashrc
@@ -105,7 +103,7 @@ setup_paths() {
     export PATH="${TOKENIZER_HEADER}:${LIBTORCH_HEADER}:${LIBTORCH_HEADER_CSRC}:${PATH}"
     export LD_LIBRARY_PATH="${LIBTORCH_LIB}:${TOKENIZER_LIB}:${LD_LIBRARY_PATH}"
 
-    if [[ $USE_OPENVINO -eq 1 || $USE_ALL -eq 1 ]]; then
+    if [[ $USE_OPENVINO -eq 1 || $USE_CODECS -eq 1 ]]; then
         # Source OpenVINO setupvars.sh if available
         if [ -f "$OPENVINO_ROOT/setupvars.sh" ]; then
             echo "Sourcing OpenVINO environment from $OPENVINO_ROOT/setupvars.sh"
@@ -128,7 +126,7 @@ verify_directories() {
     required_dirs["LibTorch Headers"]=$LIBTORCH_HEADER
     required_dirs["Tokenizers Headers"]=$TOKENIZER_HEADER
 
-    if [[ $USE_OPENVINO -eq 1 || $USE_ALL -eq 1 ]]; then
+    if [[ $USE_OPENVINO -eq 1 || $USE_CODECS -eq 1 ]]; then
         required_dirs["OpenVINO Library"]=$OPENVINO_LIB
         required_dirs["OpenVINO Headers"]=$OPENVINO_HEADER
     fi
@@ -166,7 +164,7 @@ generate_config_flags() {
         EXTRA_LDFLAGS="$EXTRA_LDFLAGS -L$OPENVINO_LIB"
     fi
 
-    if [[ $USE_ALL -eq 1 ]]; then
+    if [[ $USE_CODECS -eq 1 ]]; then
         CONFIG_FLAGS="$CONFIG_FLAGS \
         --enable-gpl \
         --enable-openssl \
@@ -198,7 +196,7 @@ main() {
 
     # Print configuration summary
     echo "FFmpeg Configuration Summary:"
-    if [[ $USE_ALL -eq 1 ]]; then
+    if [[ $USE_CODECS -eq 1 ]]; then
         echo "- Mode: Full configuration with all dependencies"
     elif [[ $USE_OPENVINO -eq 1 && $USE_CUDA -eq 1 ]]; then
         echo "- Mode: LibTorch with CUDA, Tokenizers, and OpenVINO"
