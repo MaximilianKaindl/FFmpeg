@@ -419,7 +419,7 @@ av_cold int ff_ffv1_write_extradata(AVCodecContext *avctx)
         if (f->version == 3) {
             f->micro_version = 4;
         } else if (f->version == 4)
-            f->micro_version = 4;
+            f->micro_version = 5;
         f->combined_version += f->micro_version;
         put_symbol(&c, state, f->micro_version, 0);
     }
@@ -1101,6 +1101,36 @@ static void choose_rct_params(const FFV1Context *f, FFV1SliceContext *sc,
     sc->slice_rct_ry_coef = rct_y_coeff[best][0];
 }
 
+static void encode_remap(FFV1Context *f, FFV1SliceContext *sc)
+{
+    int transparency = f->transparency;
+
+    for (int p= 0; p<3 + transparency; p++) {
+        int j = 0;
+        int lu = 0;
+        uint8_t state[2][32];
+        int run = 0;
+        memset(state, 128, sizeof(state));
+        for (int i= 0; i<65536; i++) {
+            int ri = i ^ ((i&0x8000) ? 0 : 0x7FFF);
+            int u = sc->fltmap[p][ri];
+            sc->fltmap[p][ri] = j;
+            j+= u;
+
+            if (lu == u) {
+                run ++;
+            } else {
+                put_symbol_inline(&sc->c, state[lu], run, 0, NULL, NULL);
+                if (run == 0)
+                    lu = u;
+                run = 0;
+            }
+        }
+        if (run)
+            put_symbol(&sc->c, state[lu], run, 0);
+    }
+}
+
 static int encode_slice(AVCodecContext *c, void *arg)
 {
     FFV1SliceContext *sc = arg;
@@ -1133,6 +1163,18 @@ retry:
     if (f->version > 2) {
         encode_slice_header(f, sc);
     }
+
+    if (sc->remap) {
+        if (f->colorspace == 0) {
+            av_assert0(0);
+        } else if (f->use32bit) {
+            load_rgb_frame32(f, sc, planes, width, height, p->linesize);
+        } else
+            load_rgb_frame  (f, sc, planes, width, height, p->linesize);
+
+        encode_remap(f, sc);
+    }
+
     if (ac == AC_GOLOMB_RICE) {
         sc->ac_byte_count = f->version > 2 || (!x && !y) ? ff_rac_terminate(&sc->c, f->version > 2) : 0;
         init_put_bits(&sc->pb,
@@ -1158,9 +1200,9 @@ retry:
         ret  = encode_plane(f, sc, p->data[0] +     ps*x + y*p->linesize[0], width, height, p->linesize[0], 0, 2, ac);
         ret |= encode_plane(f, sc, p->data[0] + 1 + ps*x + y*p->linesize[0], width, height, p->linesize[0], 1, 2, ac);
     } else if (f->use32bit) {
-        ret = encode_rgb_frame32(f, sc, planes, width, height, p->linesize);
+        ret = encode_rgb_frame32(f, sc, planes, width, height, p->linesize, ac);
     } else {
-        ret = encode_rgb_frame(f, sc, planes, width, height, p->linesize);
+        ret = encode_rgb_frame(f, sc, planes, width, height, p->linesize, ac);
     }
 
     if (ac != AC_GOLOMB_RICE) {
@@ -1400,7 +1442,7 @@ const FFCodec ff_ffv1_encoder = {
     .init           = encode_init_internal,
     FF_CODEC_ENCODE_CB(encode_frame),
     .close          = encode_close,
-    .p.pix_fmts     = (const enum AVPixelFormat[]) {
+    CODEC_PIXFMTS(
         AV_PIX_FMT_YUV420P,   AV_PIX_FMT_YUVA420P,  AV_PIX_FMT_YUVA422P,  AV_PIX_FMT_YUV444P,
         AV_PIX_FMT_YUVA444P,  AV_PIX_FMT_YUV440P,   AV_PIX_FMT_YUV422P,   AV_PIX_FMT_YUV411P,
         AV_PIX_FMT_YUV410P,   AV_PIX_FMT_0RGB32,    AV_PIX_FMT_RGB32,     AV_PIX_FMT_YUV420P16,
@@ -1421,10 +1463,7 @@ const FFCodec ff_ffv1_encoder = {
         AV_PIX_FMT_GRAY9,
         AV_PIX_FMT_YUV420P14, AV_PIX_FMT_YUV422P14, AV_PIX_FMT_YUV444P14,
         AV_PIX_FMT_YUV440P10, AV_PIX_FMT_YUV440P12,
-        AV_PIX_FMT_GBRPF16,
-        AV_PIX_FMT_NONE
-
-    },
+        AV_PIX_FMT_GBRPF16),
     .color_ranges   = AVCOL_RANGE_MPEG,
     .p.priv_class   = &ffv1_class,
     .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP | FF_CODEC_CAP_EOF_FLUSH,
