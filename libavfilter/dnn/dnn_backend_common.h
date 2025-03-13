@@ -161,7 +161,7 @@ int ff_dnn_fill_gettingoutput_task(TaskItem *task, DNNExecBaseParams *exec_param
  * Check if the given frame contains a valid detection bounding box.
  *
  * @param frame The frame to check for valid detection bounding box
- * 
+ *
  * @return Non-zero if frame contains valid detection bounding box, 0 otherwise
  */
 int ff_dnn_contain_valid_detection_bbox(AVFrame *frame);

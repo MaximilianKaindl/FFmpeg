@@ -277,9 +277,9 @@ static int get_input_th(DNNModel *model, DNNData *input, const char *input_name)
     return 0;
 }
 
-static void deleter(void *arg) 
-{ 
-    av_freep(&arg); 
+static void deleter(void *arg)
+{
+    av_freep(&arg);
 }
 
 #if (CONFIG_LIBTOKENIZERS == 1)
@@ -1385,6 +1385,7 @@ static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilt
         av_log(ctx, AV_LOG_ERROR, "Failed to load torch model\n");
         goto fail;
     }
+
     th_model->request_queue = ff_safe_queue_create();
     if (!th_model->request_queue) {
         goto fail;

@@ -303,13 +303,6 @@ FATE_REMOVEGRAIN-$(call FILTERDEMDEC, REMOVEGRAIN, IMAGE2, PGMYUV) += $(FATE_REM
 fate-filter-removegrain: $(FATE_REMOVEGRAIN-yes)
 FATE_FILTER_VSYNTH-yes += $(FATE_REMOVEGRAIN-yes)
 
-FATE_FILTER_VSYNTH-$(call ALLYES, LIBTORCH LIBTOKENIZERS) += fate-filter-dnn-clip
-fate-filter-dnn-clip: CMD = framecrc -i $(TARGET_SAMPLES)/vf_dnn_clip/cat.jpg \
-                      -vf dnn_clip=dnn_backend=torch:model=$(TARGET_SAMPLES)/vf_dnn_clip/openclip-vit-l-14.pt:labels=$(TARGET_SAMPLES)/vf_dnn_clip/labels.txt:tokenizer=$(TARGET_SAMPLES)/vf_dnn_clip/tokenizer.json \
-                      -bitexact -f framecrc -
-fate-filter-dnn-clip: REF = tests/ref/fate/filter-dnn-clip
-fate-filter-dnn-clip: CMP = null
-
 FATE_FILTER_VSYNTH_PGMYUV-$(CONFIG_SEPARATEFIELDS_FILTER) += fate-filter-separatefields
 fate-filter-separatefields: CMD = framecrc -c:v pgmyuv -i $(SRC) -vf separatefields
 

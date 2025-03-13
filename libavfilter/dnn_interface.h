@@ -200,7 +200,7 @@ struct DNNModule {
     DNNBackendType type;
     // Loads model and parameters from given file. Returns NULL if it is not possible.
     DNNModel *(*load_model)(DnnContext *ctx, DNNFunctionType func_type, AVFilterContext *filter_ctx);
-    
+
     // Loads model, tokenizer and parameters from given files. Returns NULL if it is not possible.
     DNNModel *(*load_model_with_tokenizer)(DnnContext *ctx, DNNFunctionType func_type, const char** labels, int label_count, int* softmax_units, int softmax_units_count, const char* tokenizer_path, AVFilterContext *filter_ctx);
 

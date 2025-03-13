@@ -18,8 +18,6 @@
 
 #include "detection_bbox.h"
 #include "mem.h"
-#include "libavutil/avstring.h"
-
 
 AVDetectionBBoxHeader *av_detection_bbox_alloc(uint32_t nb_bboxes, size_t *out_size)
 {
