@@ -10,7 +10,7 @@ show_help() {
     echo "  --cuda            Use LibTorch with CUDA support"
     echo "  --codecs          Enable codec libraries (x264, x265, fdk-aac)"
     echo "  --openssl         Include OpenSSL support"
-    echo "  --draw            Include drawing libraries (freetype, fontconfig, harfbuzz, etc.)"
+    echo "  --draw            Include drawing libraries for ffplay (freetype, fontconfig, harfbuzz, etc.)"
     echo "  --all             Enable all features (shorthand for all available options)"
     echo "  --print-bashrc    Print lines to add to your .bashrc file"
     echo
@@ -20,7 +20,7 @@ show_help() {
     echo "Required dependencies for different configurations:"
     echo
     echo "Basic (Required for all configurations):"
-    echo "sudo apt install -y build-essential pkg-config"
+    echo "sudo apt install -y build-essential pkg-config nasm"
     echo
     echo "For --cuda option:"
     echo "sudo apt install -y nvidia-cuda-toolkit"
@@ -38,7 +38,7 @@ show_help() {
     echo "sudo apt install -y libfreetype6-dev libfontconfig1-dev libharfbuzz-dev libxcb1-dev libsdl2-dev libass-dev"
     echo
     echo "To enable all:"
-    echo "sudo apt install -y build-essential pkg-config nvidia-cuda-toolkit libx264-dev libx265-dev libfdk-aac-dev libssl-dev libfreetype6-dev libfontconfig1-dev libharfbuzz-dev libxcb1-dev libsdl2-dev libass-dev libvpx-dev libmp3lame-dev libopus-dev libaom-dev"
+    echo "sudo apt install -y build-essential pkg-config nasm nvidia-cuda-toolkit libx264-dev libx265-dev libfdk-aac-dev libssl-dev libfreetype6-dev libfontconfig1-dev libharfbuzz-dev libxcb1-dev libsdl2-dev libass-dev libvpx-dev libmp3lame-dev libopus-dev libaom-dev"
 }
 
 # Print bashrc variables
