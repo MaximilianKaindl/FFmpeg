@@ -1338,10 +1338,8 @@ static THModel *init_model_th(DnnContext *ctx, DNNFunctionType func_type, AVFilt
             av_log(ctx, AV_LOG_ERROR, "No XPU device found\n");
             goto fail;
         }
-#if (CONFIG_LIBTORCH_CUDA == 0)
-        at::detail::getXPUHooks().initXPU();
-#else
         at::detail::getXPUHooks().init();
+#if (CONFIG_LIBTORCH_CUDA == 1)
     } else if (device.is_cuda()) {
         if (!torch::cuda::is_available()) {
             av_log(ctx, AV_LOG_ERROR, "CUDA is not available!\n");
